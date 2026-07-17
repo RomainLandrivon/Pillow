@@ -60,12 +60,12 @@ main{padding:18px 20px 20px;max-width:720px;margin:0 auto}
 
 nav{
   position:fixed;bottom:0;left:0;right:0;z-index:30;
-  background:rgba(25,18,33,.94);backdrop-filter:blur(12px);
+  background:var(--nuit);
   border-top:1px solid var(--bord);
   display:grid;grid-template-columns:repeat(5,1fr);
   padding-bottom:var(--safe-b);
 }
-nav button{padding:11px 2px 13px;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--brume);font-size:9.5px;font-weight:600;letter-spacing:.02em}
+nav button{padding:11px 2px 13px;display:flex;flex-direction:column;align-items:center;gap:5px;color:var(--brume);font-size:9.5px;font-weight:600;letter-spacing:.02em;white-space:nowrap}
 nav button svg{width:21px;height:21px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
 nav button.on{color:var(--beurre)}
 
@@ -161,6 +161,8 @@ let histSerieOuv = new Set();   // séries dépliées dans l'historique
 let histSaisonOuv = new Set();  // saisons dépliées, clé "idSerie:n"
 let decOnglet = "sorties";
 let decFiltre = "tout";   // tout | series | films
+let decQ = "";           // recherche en cours dans Découverte
+let decTimer;
 let decCache = { sorties:null, pourtoi:null };
 let ouvert = null;
 
@@ -248,6 +250,17 @@ const versTuile = (r,type) => ({
   votes:r.vote_count||0,
 });
 
+async function chercherTuiles(q){
+  const [s,f] = await Promise.all([
+    tmdb("/search/tv",   {query:q, include_adult:"false"}).catch(()=>({results:[]})),
+    tmdb("/search/movie",{query:q, include_adult:"false"}).catch(()=>({results:[]})),
+  ]);
+  return {
+    series:(s.results||[]).map(r=>versTuile(r,"series")).filter(x=>x.titre),
+    films: (f.results||[]).map(r=>versTuile(r,"films")).filter(x=>x.titre),
+  };
+}
+
 async function sorties(){
   const paquets = { series:[], films:[] };
   const deja = new Set();
@@ -304,6 +317,9 @@ async function pourToi(){
 /* ============ rendu ============ */
 const $ = s => document.querySelector(s);
 function rendre(){
+  // remplacer le contenu remet la page en haut : on repose le lecteur où il était.
+  // Changer d'onglet remonte volontairement, via window.scrollTo dans le gestionnaire.
+  const sy = window.scrollY;
   const meta = {
     series:  ["Suivi", "Séries",     D.series.filter(s=>!fini(s)).length + " en cours"],
     films:   ["Suivi", "Films",      D.films.filter(f=>!f.vuLe).length + " à voir"],
@@ -317,6 +333,7 @@ function rendre(){
   $("#fab").style.display = (page==="series"||page==="films") ? "grid" : "none";
   $("#vue").innerHTML = { series:vueSeries, films:vueFilms, decouv:vueDecouv, hist:vueHist, reglages:vueReglages }[page]();
   rendreNav();
+  window.scrollTo(0, sy);
   if(page==="decouv") chargerDecouv();
 }
 function rendreNav(){
@@ -399,9 +416,13 @@ function ficheFilm(id){
 function vueDecouv(){
   if(!aCle()) return vide("Découverte a besoin d'une clé TMDB","Les sorties et les suggestions viennent de TMDB. Ajoute une clé dans Réglages — c'est gratuit et ça prend cinq minutes.");
   const chips = [["tout","Tout"],["series","Séries"],["films","Films"]];
-  return `<div style="display:flex;gap:8px;margin-bottom:11px">
-    <button class="btn ${decOnglet==="sorties"?"":"ghost"}" style="flex:1;padding:9px" data-dec="sorties">Sorties</button>
-    <button class="btn ${decOnglet==="pourtoi"?"":"ghost"}" style="flex:1;padding:9px" data-dec="pourtoi">Pour toi</button>
+  return `<div style="position:relative;margin-bottom:11px">
+    <input id="decq" placeholder="Chercher un film ou une série" value="${esc(decQ)}" autocomplete="off" style="padding-right:40px">
+    <button id="decx" aria-label="Effacer la recherche" style="display:${decQ?"block":"none"};position:absolute;right:4px;top:0;bottom:0;width:36px;color:var(--brume);font-size:20px">×</button>
+  </div>
+  <div style="display:flex;gap:8px;margin-bottom:11px">
+    <button class="btn ${decOnglet==="sorties"&&!decQ?"":"ghost"}" style="flex:1;padding:9px" data-dec="sorties">Sorties</button>
+    <button class="btn ${decOnglet==="pourtoi"&&!decQ?"":"ghost"}" style="flex:1;padding:9px" data-dec="pourtoi">Pour toi</button>
   </div>
   <div style="display:flex;gap:7px;margin-bottom:17px">
     ${chips.map(([id,lab])=>`<button class="chip ${decFiltre===id?"on":""}" data-decf="${id}">${lab}</button>`).join("")}
@@ -411,25 +432,47 @@ function vueDecouv(){
 
 // le filtre trie ce qui est déjà en cache : changer de filtre ne relance aucun appel
 function filtrer(d, ong){
-  if(ong==="sorties"){
-    if(decFiltre==="series") return d.series.slice(0,24);
-    if(decFiltre==="films")  return d.films.slice(0,24);
-    const out=[], n=Math.max(d.series.length, d.films.length);
-    for(let i=0;i<n;i++){ if(d.series[i]) out.push(d.series[i]); if(d.films[i]) out.push(d.films[i]); }
-    return out.slice(0,24);
-  }
-  return d.items.filter(x=>decFiltre==="tout"||x.type===decFiltre).slice(0,24);
+  if(ong==="pourtoi") return d.items.filter(x=>decFiltre==="tout"||x.type===decFiltre).slice(0,24);
+  if(decFiltre==="series") return d.series.slice(0,24);
+  if(decFiltre==="films")  return d.films.slice(0,24);
+  const out=[], n=Math.max(d.series.length, d.films.length);
+  for(let i=0;i<n;i++){ if(d.series[i]) out.push(d.series[i]); if(d.films[i]) out.push(d.films[i]); }
+  return out.slice(0,24);
 }
 
 async function chargerDecouv(){
   const box = $("#decRes"); if(!box) return;
+
+  // le champ est rebranché à chaque rendu ; taper ne redessine pas la page,
+  // sinon on perdrait le focus à chaque lettre.
+  const inp = $("#decq"), croix = $("#decx");
+  if(inp){
+    inp.oninput = ()=>{
+      decQ = inp.value.trim();
+      croix.style.display = decQ ? "block" : "none";   // pas de rendre() : le focus resterait dans le vide
+      clearTimeout(decTimer);
+      decTimer = setTimeout(chargerDecouv, 400);
+    };
+  }
+  if(croix) croix.onclick = ()=>{ decQ=""; clearTimeout(decTimer); rendre(); };
+
+  if(decQ){
+    const q = decQ;
+    box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
+    try{
+      const d = await chercherTuiles(q);
+      if(page==="decouv" && decQ===q) peindreDecouv(d, "recherche");
+    }catch(e){ box.innerHTML = `<p class="err" style="padding:10px 0">${esc(e.message)}</p>`; }
+    return;
+  }
+
   const ong = decOnglet;
   if(decCache[ong]){ peindreDecouv(decCache[ong], ong); return; }
   box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
   try{
     const d = ong==="sorties" ? await sorties() : await pourToi();
     decCache[ong] = d;
-    if(page==="decouv" && decOnglet===ong) peindreDecouv(d, ong);
+    if(page==="decouv" && decOnglet===ong && !decQ) peindreDecouv(d, ong);
   }catch(e){
     box.innerHTML = `<p class="err" style="padding:10px 0">${esc(e.message)}</p>
       <button class="btn ghost" style="width:100%;margin-top:8px" data-decretry="1">Réessayer</button>`;
@@ -444,12 +487,16 @@ function peindreDecouv(d, ong){
   const items = filtrer(d, ong);
   if(!items.length){
     const quoi = decFiltre==="series" ? "série" : decFiltre==="films" ? "film" : "titre";
+    if(ong==="recherche")
+      return box.innerHTML = vide("Aucun "+quoi+" pour « "+esc(decQ)+" »","Vérifie l'orthographe, ou essaie le titre original.");
     return box.innerHTML = vide("Aucun "+quoi+" ici",
       decFiltre==="tout" ? "TMDB n'a rien renvoyé. Réessaie plus tard."
                          : "Change de filtre, ou reviens plus tard — tout ce qui sortait est peut-être déjà dans ta liste.");
   }
 
-  const intro = ong==="sorties"
+  const intro = ong==="recherche"
+    ? "Résultats pour « "+esc(decQ)+" ». Le + ajoute directement à ta liste."
+    : ong==="sorties"
     ? "Films au cinéma et séries diffusées en ce moment. Ce que tu suis déjà est écarté."
     : "Construit à partir des titres de ta liste. Ce que tu as déjà commencé ou vu pèse le double.";
 
@@ -490,8 +537,9 @@ function histSeries(){
     return `<div class="card" style="margin-bottom:10px">
       <button class="ligne" data-hs="${s.id}" aria-expanded="${dep}">
         ${chev(dep)}
+        <span class="poster" style="${s.poster?`background-image:url(${img(s.poster)})`:""};width:38px;flex:0 0 38px;min-height:54px;font-size:12px">${s.poster?"":esc(init(s.titre))}</span>
         <span style="flex:1;min-width:0;text-align:left">
-          <span style="font-weight:600;font-size:16px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.titre)}</span>
+          <span style="font-weight:600;font-size:15.5px;display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.titre)}</span>
           <span class="mono" style="font-size:11px;color:var(--brume)">${nbVus(s)}/${totalEp(s)} épisodes · ${saisonsVues.length} saison${saisonsVues.length>1?"s":""}</span>
         </span>
         ${fini(s)?'<span class="pill" style="color:var(--beurre);border-color:var(--beurre);flex:0 0 auto">Terminée</span>':""}
@@ -572,7 +620,7 @@ function vueReglages(){
 function vide(t,s){ return `<div class="vide"><h3>${t}</h3><p style="font-size:14px">${s}</p></div>`; }
 
 /* ============ feuille : détail d'une série ============ */
-function detail(id){
+function detail(id, scroll=0){
   const s = D.series.find(x=>x.id===id); if(!s) return;
   const ep = suivant(s), t=totalEp(s), v=nbVus(s);
   const corps = `
@@ -604,17 +652,20 @@ function detail(id){
     }).join("")}
     <button class="btn danger" style="width:100%;margin-top:6px" data-supprimer="${s.id}">Retirer cette série</button>`;
   feuille(corps, el=>{
+    const boite = el.firstElementChild;
+    boite.scrollTop = scroll;
+    const rejouer = () => { const y = boite.scrollTop; fermer(); detail(id, y); rendre(); };
     el.querySelectorAll("[data-ep]").forEach(b=>b.onclick=()=>{
       const [sn,en] = b.dataset.ep.split(",").map(Number);
       marquer(s, sn, en, !s.vus[cle(sn,en)]);
-      fermer(); detail(id); rendre();
+      rejouer();
     });
     el.querySelectorAll("[data-saison]").forEach(b=>b.onclick=()=>{
       const sn = Number(b.dataset.saison);
       const sa = s.saisons.find(x=>x.n===sn);
       const tout = sa.episodes.every(e=>s.vus[cle(sn,e.n)]);
       sa.episodes.forEach(e=>marquer(s, sn, e.n, !tout));
-      fermer(); detail(id); rendre();
+      rejouer();
     });
     el.querySelector("[data-supprimer]").onclick=()=>{
       if(!confirm("Retirer « "+s.titre+" » et son historique ?")) return;
@@ -746,7 +797,7 @@ document.addEventListener("click", e=>{
     histSaisonOuv.has(k) ? histSaisonOuv.delete(k) : histSaisonOuv.add(k);
     rendre(); return;
   }
-  if((b=c("[data-dec]"))){ decOnglet=b.dataset.dec; rendre(); return; }
+  if((b=c("[data-dec]"))){ decOnglet=b.dataset.dec; decQ=""; clearTimeout(decTimer); rendre(); return; }
   if((b=c("[data-decf]"))){ decFiltre=b.dataset.decf; rendre(); return; }
   if(c("[data-decretry]")){ decCache[decOnglet]=null; chargerDecouv(); return; }
   if((b=c("[data-decadd]"))){
