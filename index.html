@@ -98,6 +98,7 @@ nav button.on{color:var(--beurre)}
 .tuile .plus{position:absolute;right:6px;bottom:6px;width:28px;height:28px;border-radius:50%;background:var(--beurre);color:#2A1D07;display:grid;place-items:center;font-size:19px;font-family:"Bricolage Grotesque";font-weight:600;box-shadow:0 2px 9px rgba(0,0,0,.5)}
 .tuile .masquer{position:absolute;right:6px;top:6px;width:24px;height:24px;border-radius:50%;background:rgba(25,18,33,.85);border:1px solid var(--bord);color:var(--ivoire);font-size:16px;line-height:1;display:grid;place-items:center;font-weight:600}
 .tuile .masquer:active{background:var(--nuit-3)}
+.tuile .pastille-sortie{position:absolute;left:6px;right:6px;bottom:6px;background:rgba(25,18,33,.9);border:1px solid var(--beurre);color:var(--beurre);font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;letter-spacing:.02em;padding:4px 6px;border-radius:6px;text-align:center;text-transform:uppercase}
 .tuile .marque{position:absolute;left:6px;top:6px;font-family:"IBM Plex Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.06em;padding:2px 6px;border-radius:999px;background:rgba(25,18,33,.85);color:var(--ivoire);border:1px solid var(--bord)}
 .tuile .nom{font-size:13px;font-weight:600;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tuile .pq{font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--brume);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -219,6 +220,39 @@ function epFutur(ep){
 function dateEp(iso){
   return new Date(iso+"T00:00").toLocaleDateString("fr-FR",{day:"numeric",month:"short",year:"numeric"});
 }
+// même logique que epFutur, appliquée aux films (qui ont maintenant f.date aussi)
+function filmFutur(f){ return epFutur(f); }
+
+// Format années · mois · jours · heures. Fallback à minutes en dessous d'une heure.
+// Mois = 30 jours et année = 12 mois : les moyennes plus précises (30.44, 365.25)
+// donnent des chiffres exacts mais illisibles ("2 mois · 29 j · 18 h" au lieu de "3 mois").
+function dureeAffichee(min){
+  if(min <= 0) return "";
+  if(min < 60) return min + " min";
+  const H=60, J=24*H, M=30*J, AN=12*M;
+  let r = min;
+  const an = Math.floor(r/AN);   r -= an*AN;
+  const mois = Math.floor(r/M);  r -= mois*M;
+  const j = Math.floor(r/J);     r -= j*J;
+  const h = Math.floor(r/H);
+  const parts = [];
+  if(an)   parts.push(an+" an"+(an>1?"s":""));
+  if(mois) parts.push(mois+" mois");
+  if(j)    parts.push(j+" j");
+  if(h)    parts.push(h+" h");
+  return parts.join(" · ");
+}
+
+// Temps de visionnage d'une série : somme des durées des épisodes vus.
+// TMDB ne connaît pas toujours la durée épisode par épisode : à défaut, 42 min
+// (moyenne des séries scriptées TV).
+function totalMinSerie(s){
+  let t = 0;
+  for(const sa of s.saisons)
+    for(const ep of sa.episodes)
+      if(s.vus[cle(sa.n,ep.n)]) t += ep.duree || 42;
+  return t;
+}
 function marquer(s, sn, en, val){
   const k = cle(sn,en);
   if(val) s.vus[k] = new Date().toISOString();
@@ -262,7 +296,7 @@ async function importerSerie(id){
 }
 async function importerFilm(id){
   const d = await tmdb("/movie/"+id);
-  return { id:uid(), tmdbId:id, titre:d.title, annee:(d.release_date||"").slice(0,4), poster:d.poster_path, duree:d.runtime||null, vuLe:null, ajoute:new Date().toISOString() };
+  return { id:uid(), tmdbId:id, titre:d.title, annee:(d.release_date||"").slice(0,4), poster:d.poster_path, duree:d.runtime||null, date:d.release_date||null, vuLe:null, ajoute:new Date().toISOString() };
 }
 
 /* ============ découverte ============ */
@@ -430,19 +464,21 @@ function vueFilms(){
   const a = D.films.filter(f=>!f.vuLe)
     .sort((a,b)=> (b.annee||"0").localeCompare(a.annee||"0") || a.titre.localeCompare(b.titre));
   if(!a.length) return vide("Aucun film à voir","Ajoute un film avec le bouton +. Une fois vu, il part dans l'historique.");
-  return `<div class="cartes trois">${a.map(f=>`
-    <div class="tuile" data-ffiche="films:${f.id}">
+  return `<div class="cartes trois">${a.map(f=>{
+    const futur = filmFutur(f);
+    return `<div class="tuile ${futur?"attente":""}" data-ffiche="films:${f.id}">
       <div class="aff" style="${f.poster?`background-image:url(${img(f.poster)})`:""}">
         ${f.poster?"":esc(init(f.titre))}
-        <button class="coche" data-filmvu="${f.id}" aria-label="Marquer ${esc(f.titre)} comme vu">
-          <svg viewBox="0 0 24 24"><path d="M4 12.5 9.5 18 20 6.5"/></svg>
-        </button>
+        ${futur
+          ? `<span class="pastille-sortie">Sortie ${dateEp(f.date)}</span>`
+          : `<button class="coche" data-filmvu="${f.id}" aria-label="Marquer ${esc(f.titre)} comme vu"><svg viewBox="0 0 24 24"><path d="M4 12.5 9.5 18 20 6.5"/></svg></button>`}
       </div>
       <div>
         <div class="nom">${esc(f.titre)}</div>
         <div class="pq">${f.annee||"—"}${f.duree?" · "+f.duree+" min":""}</div>
       </div>
-    </div>`).join("")}</div>`;
+    </div>`;
+  }).join("")}</div>`;
 }
 
 // Fiche descriptive : synopsis, acteurs, bande-annonce.
@@ -649,10 +685,13 @@ function histSeries(){
   avec.sort((a,b)=> histSerieTri==="vu"
     ? derniereActivite(b).localeCompare(derniereActivite(a))
     : (b.annee||"0").localeCompare(a.annee||"0") || a.titre.localeCompare(b.titre));
+  const totalMin = avec.reduce((a,s)=>a+totalMinSerie(s),0);
+  const total = dureeAffichee(totalMin);
   return `<div style="display:flex;gap:7px;margin-bottom:14px">
     <button class="chip ${histSerieTri==='vu'?'on':''}" data-hts="vu">Vu récemment</button>
     <button class="chip ${histSerieTri==='sortie'?'on':''}" data-hts="sortie">Date de sortie</button>
-  </div>` + avec.map(s=>{
+  </div>
+  <div class="mono" style="font-size:12px;color:var(--brume);margin-bottom:14px">${avec.length} série${avec.length>1?"s":""}${total?" · "+total:""}</div>` + avec.map(s=>{
     const dep = histSerieOuv.has(s.id);
     const saisonsVues = s.saisons.filter(sa=>sa.episodes.some(e=>s.vus[cle(sa.n,e.n)]));
     return `<div class="card" style="margin-bottom:10px">
@@ -698,11 +737,12 @@ function histFilms(){
     ? b.vuLe.localeCompare(a.vuLe)
     : (b.annee||"0").localeCompare(a.annee||"0") || a.titre.localeCompare(b.titre));
   const h = vus.reduce((a,f)=>a+(f.duree||0),0);
+  const total = dureeAffichee(h);
   return `<div style="display:flex;gap:7px;margin-bottom:14px">
     <button class="chip ${histFilmTri==='vu'?'on':''}" data-htf="vu">Vu récemment</button>
     <button class="chip ${histFilmTri==='sortie'?'on':''}" data-htf="sortie">Date de sortie</button>
   </div>
-  <div class="mono" style="font-size:12px;color:var(--brume);margin-bottom:14px">${vus.length} film${vus.length>1?"s":""}${h?" · "+Math.round(h/60)+" h":""}</div>
+  <div class="mono" style="font-size:12px;color:var(--brume);margin-bottom:14px">${vus.length} film${vus.length>1?"s":""}${total?" · "+total:""}</div>
   <div class="cartes trois">${vus.map(f=>`
     <div class="tuile" data-ffiche="films:${f.id}">
       <div class="aff" style="${f.poster?`background-image:url(${img(f.poster)})`:""}">${f.poster?"":esc(init(f.titre))}</div>
@@ -778,7 +818,9 @@ function detail(id, scroll=0){
         <div class="grid">${sa.episodes.map(e=>{
           const on = !!s.vus[cle(sa.n,e.n)];
           const nx = ep && ep.saison===sa.n && ep.n===e.n;
-          return `<button class="ep ${on?"vu":""} ${nx?"suivant":""}" data-ep="${sa.n},${e.n}" title="${esc(e.titre||"")}" aria-pressed="${on}">${e.n}</button>`;
+          const fut = epFutur(e);
+          const t = (e.titre||"") + (fut ? (e.titre?" · ":"") + "Sortie " + dateEp(e.date) : "");
+          return `<button class="ep ${on?"vu":""} ${nx?"suivant":""} ${fut?"attente":""}" data-ep="${sa.n},${e.n}" title="${esc(t)}" aria-pressed="${on}">${e.n}</button>`;
         }).join("")}</div>
       </div>`;
     }).join("")}
