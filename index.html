@@ -162,11 +162,11 @@ let histOnglet = "series";
 let histSerieOuv = new Set();   // séries dépliées dans l'historique
 let histSaisonOuv = new Set();  // saisons dépliées, clé "idSerie:n"
 let histFilmTri = "vu";  // "vu" ou "sortie"
-let decOnglet = "sorties";
-let decFiltre = "tout";   // tout | series | films
-let decQ = "";           // recherche en cours dans Découverte
+let decOnglet = "series";   // series | films
+let decFiltre = "moment";   // moment | avenir | top | pourtoi
+let decCache = {};          // indexé par "onglet:filtre"
+let decQ = "";              // recherche en cours dans Découverte
 let decTimer;
-let decCache = { sorties:null, pourtoi:null };
 let ouvert = null;
 
 function charger(){
@@ -178,7 +178,7 @@ function sauver(){
   catch(e){ toast("Sauvegarde impossible — stockage plein ?"); }
 }
 // la liste a changé : les suggestions doivent être recalculées
-function invaliderSuggestions(){ decCache.pourtoi = null; }
+function invaliderSuggestions(){ decCache = {}; }
 const uid = () => Math.random().toString(36).slice(2,10);
 const img = p => p ? "https://image.tmdb.org/t/p/w185"+p : null;
 const init = t => t.replace(/[^A-Za-zÀ-ÿ0-9 ]/g,"").split(/\s+/).filter(Boolean).slice(0,2).map(m=>m[0].toUpperCase()).join("");
@@ -280,50 +280,64 @@ async function chercherTuiles(q){
   };
 }
 
-async function sorties(){
-  const paquets = { series:[], films:[] };
-  const deja = new Set();
-  // on pagine jusqu'à avoir de quoi remplir la grille une fois retiré ce qu'elle suit déjà
+// Endpoints TMDB pour chaque paire (onglet, filtre).
+// Les paramètres dynamiques (dates) sont générés à l'appel, pas au chargement du fichier.
+const ENDPOINTS = {
+  series: {
+    moment: () => ["/tv/on_the_air", {}],
+    avenir: () => ["/discover/tv", {
+      "first_air_date.gte": new Date().toISOString().slice(0,10),
+      "sort_by": "popularity.desc",
+    }],
+    top:    () => ["/tv/top_rated", {}],
+  },
+  films: {
+    moment: () => ["/movie/now_playing", {}],
+    avenir: () => ["/movie/upcoming", {}],
+    top:    () => ["/movie/top_rated", {}],
+  },
+};
+
+async function chargerFiltre(onglet, filtre){
+  if(filtre === "pourtoi") return await pourToiFiltre(onglet);
+  const [chemin, params] = ENDPOINTS[onglet][filtre]();
+  const items = [];
+  // On pagine pour avoir de quoi remplir la grille même après avoir retiré
+  // les titres déjà dans la liste. Trois pages suffisent en pratique.
   for(let p=1; p<=3; p++){
-    const [f,s] = await Promise.all([
-      tmdb("/movie/now_playing",{page:String(p)}).catch(()=>({results:[]})),
-      tmdb("/tv/on_the_air",{page:String(p)}).catch(()=>({results:[]})),
-    ]);
-    for(const [d,type] of [[s,"series"],[f,"films"]]){
-      for(const r of (d.results||[])){
-        const t = versTuile(r,type);
-        const k = type+":"+t.tmdbId;
-        if(deja.has(k)) continue;
-        deja.add(k);
-        if(dansMaListe(t.tmdbId,type)) continue;   // déjà dans sa liste : la place va à un autre
-        paquets[type].push(t);
-      }
+    let d;
+    try{ d = await tmdb(chemin, {page:String(p), ...params}); }
+    catch(e){ if(p===1) throw e; break; }
+    for(const r of (d.results||[])){
+      const t = versTuile(r, onglet);
+      if(dansMaListe(t.tmdbId, onglet)) continue;
+      items.push(t);
     }
-    if(paquets.series.length>=26 && paquets.films.length>=26) break;
-    if(!(f.results||[]).length && !(s.results||[]).length) break;
+    if(items.length >= 24) break;
+    if(!(d.results||[]).length) break;
   }
-  return paquets;
+  return { items: items.slice(0,24) };
 }
 
-async function pourToi(){
-  const sources = [
-    ...D.series.filter(s=>s.tmdbId).map(s=>({id:s.tmdbId, type:"series", titre:s.titre, poids:nbVus(s)>0?2:1})),
-    ...D.films.filter(f=>f.tmdbId).map(f=>({id:f.tmdbId, type:"films", titre:f.titre, poids:f.vuLe?2:1})),
-  ];
+// Recommandations basées sur les titres de la liste, filtrées par type.
+async function pourToiFiltre(onglet){
+  const sources = onglet === "series"
+    ? D.series.filter(s=>s.tmdbId).map(s=>({id:s.tmdbId, titre:s.titre, poids:nbVus(s)>0?2:1}))
+    : D.films.filter(f=>f.tmdbId).map(f=>({id:f.tmdbId, titre:f.titre, poids:f.vuLe?2:1}));
   if(!sources.length) return { vide:true, items:[] };
-  // les titres les plus engagés d'abord, puis on plafonne pour rester rapide
   const choix = sources.sort((a,b)=>b.poids-a.poids).slice(0,8);
+  const type = onglet === "series" ? "tv" : "movie";
   const lots = await Promise.all(choix.map(async src=>{
     try{
-      const d = await tmdb("/"+(src.type==="series"?"tv":"movie")+"/"+src.id+"/recommendations");
-      return (d.results||[]).slice(0,12).map(r=>({ t:versTuile(r,src.type), pq:src.titre, poids:src.poids }));
+      const d = await tmdb("/"+type+"/"+src.id+"/recommendations");
+      return (d.results||[]).slice(0,12).map(r=>({ t:versTuile(r,onglet), pq:src.titre, poids:src.poids }));
     }catch(e){ return []; }
   }));
   const tally = new Map();
   for(const lot of lots) for(const {t,pq,poids} of lot){
-    if(dansMaListe(t.tmdbId,t.type)) continue;
-    if(t.votes < 40) continue; // écarte les titres trop peu notés
-    const k = t.type+":"+t.tmdbId;
+    if(dansMaListe(t.tmdbId, onglet)) continue;
+    if(t.votes < 40) continue;
+    const k = t.tmdbId;
     const e = tally.get(k) || { ...t, score:0, raisons:[] };
     e.score += poids;
     if(!e.raisons.includes(pq)) e.raisons.push(pq);
@@ -493,30 +507,20 @@ async function ficheDescription(type, tmdbId, localId){
 
 /* ---- page Découverte ---- */
 function vueDecouv(){
-  if(!aCle()) return vide("Découverte a besoin d'une clé TMDB","Les sorties et les suggestions viennent de TMDB. Ajoute une clé dans Réglages — c'est gratuit et ça prend cinq minutes.");
-  const chips = [["tout","Tout"],["series","Séries"],["films","Films"]];
+  if(!aCle()) return vide("Découverte a besoin d'une clé TMDB","Les sélections viennent de TMDB. Ajoute une clé dans Réglages — c'est gratuit et ça prend cinq minutes.");
+  const filtres = [["moment","Du moment"],["avenir","À venir"],["top","Mieux évalués"],["pourtoi","Pour toi"]];
   return `<div style="position:relative;margin-bottom:11px">
     <input id="decq" placeholder="Chercher un film ou une série" value="${esc(decQ)}" autocomplete="off" style="padding-right:40px">
     <button id="decx" aria-label="Effacer la recherche" style="display:${decQ?"block":"none"};position:absolute;right:4px;top:0;bottom:0;width:36px;color:var(--brume);font-size:20px">×</button>
   </div>
   <div style="display:flex;gap:8px;margin-bottom:11px">
-    <button class="btn ${decOnglet==="sorties"&&!decQ?"":"ghost"}" style="flex:1;padding:9px" data-dec="sorties">Sorties</button>
-    <button class="btn ${decOnglet==="pourtoi"&&!decQ?"":"ghost"}" style="flex:1;padding:9px" data-dec="pourtoi">Pour toi</button>
+    <button class="btn ${decOnglet==="series"?"":"ghost"}" style="flex:1;padding:9px" data-dec="series">Séries</button>
+    <button class="btn ${decOnglet==="films"?"":"ghost"}" style="flex:1;padding:9px" data-dec="films">Films</button>
   </div>
-  <div style="display:flex;gap:7px;margin-bottom:17px">
-    ${chips.map(([id,lab])=>`<button class="chip ${decFiltre===id?"on":""}" data-decf="${id}">${lab}</button>`).join("")}
-  </div>
+  ${decQ?"":`<div style="display:flex;gap:7px;margin-bottom:17px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none">
+    ${filtres.map(([id,lab])=>`<button class="chip ${decFiltre===id?"on":""}" data-decf="${id}" style="flex:0 0 auto;white-space:nowrap">${lab}</button>`).join("")}
+  </div>`}
   <div id="decRes"></div>`;
-}
-
-// le filtre trie ce qui est déjà en cache : changer de filtre ne relance aucun appel
-function filtrer(d, ong){
-  if(ong==="pourtoi") return d.items.filter(x=>decFiltre==="tout"||x.type===decFiltre).slice(0,24);
-  if(decFiltre==="series") return d.series.slice(0,24);
-  if(decFiltre==="films")  return d.films.slice(0,24);
-  const out=[], n=Math.max(d.series.length, d.films.length);
-  for(let i=0;i<n;i++){ if(d.series[i]) out.push(d.series[i]); if(d.films[i]) out.push(d.films[i]); }
-  return out.slice(0,24);
 }
 
 async function chargerDecouv(){
@@ -528,7 +532,7 @@ async function chargerDecouv(){
   if(inp){
     inp.oninput = ()=>{
       decQ = inp.value.trim();
-      croix.style.display = decQ ? "block" : "none";   // pas de rendre() : le focus resterait dans le vide
+      croix.style.display = decQ ? "block" : "none";
       clearTimeout(decTimer);
       decTimer = setTimeout(chargerDecouv, 400);
     };
@@ -545,44 +549,59 @@ async function chargerDecouv(){
     return;
   }
 
-  const ong = decOnglet;
-  if(decCache[ong]){ peindreDecouv(decCache[ong], ong); return; }
+  const cle = decOnglet+":"+decFiltre;
+  if(decCache[cle]){ peindreDecouv(decCache[cle], "filtre"); return; }
   box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
   try{
-    const d = ong==="sorties" ? await sorties() : await pourToi();
-    decCache[ong] = d;
-    if(page==="decouv" && decOnglet===ong && !decQ) peindreDecouv(d, ong);
+    const d = await chargerFiltre(decOnglet, decFiltre);
+    decCache[cle] = d;
+    if(page==="decouv" && !decQ && (decOnglet+":"+decFiltre)===cle) peindreDecouv(d, "filtre");
   }catch(e){
     box.innerHTML = `<p class="err" style="padding:10px 0">${esc(e.message)}</p>
       <button class="btn ghost" style="width:100%;margin-top:8px" data-decretry="1">Réessayer</button>`;
   }
 }
 
-function peindreDecouv(d, ong){
-  const box = $("#decRes"); if(!box) return;
-  if(ong==="pourtoi" && d.vide)
-    return box.innerHTML = vide("Rien à suggérer pour l'instant","Les suggestions se construisent à partir de ta liste. Ajoute deux ou trois séries ou films trouvés via la recherche, puis reviens.");
+// Intros et textes vides selon la paire onglet:filtre. Table plutôt que cascade de if.
+const INTROS = {
+  "series:moment": "Séries actuellement diffusées. Ce que tu suis déjà est écarté.",
+  "series:avenir": "Nouvelles séries dont la diffusion est à venir.",
+  "series:top":    "Les séries les mieux notées selon TMDB.",
+  "series:pourtoi":"Sélection à partir des séries de ta liste. Ce que tu as commencé pèse le double.",
+  "films:moment":  "Films au cinéma en ce moment. Ce que tu suis déjà est écarté.",
+  "films:avenir":  "Films dont la sortie est prévue prochainement.",
+  "films:top":     "Les films les mieux notés selon TMDB.",
+  "films:pourtoi": "Sélection à partir des films de ta liste. Ce que tu as vu pèse le double.",
+};
 
-  const items = filtrer(d, ong);
-  if(!items.length){
-    const quoi = decFiltre==="series" ? "série" : decFiltre==="films" ? "film" : "titre";
-    if(ong==="recherche")
-      return box.innerHTML = vide("Aucun "+quoi+" pour « "+esc(decQ)+" »","Vérifie l'orthographe, ou essaie le titre original.");
-    return box.innerHTML = vide("Aucun "+quoi+" ici",
-      decFiltre==="tout" ? "TMDB n'a rien renvoyé. Réessaie plus tard."
-                         : "Change de filtre, ou reviens plus tard — tout ce qui sortait est peut-être déjà dans ta liste.");
+function peindreDecouv(d, mode){
+  const box = $("#decRes"); if(!box) return;
+
+  if(mode === "filtre" && decFiltre==="pourtoi" && d.vide){
+    const quoi = decOnglet==="series" ? "série" : "film";
+    return box.innerHTML = vide("Rien à suggérer pour l'instant",
+      "Les suggestions se construisent à partir de ta liste. Ajoute deux ou trois "+quoi+"s trouvés via la recherche, puis reviens.");
   }
 
-  const intro = ong==="recherche"
+  const items = mode==="recherche"
+    ? (decOnglet==="series" ? d.series : d.films).slice(0,24)
+    : d.items;
+
+  if(!items.length){
+    const quoi = decOnglet==="series" ? "série" : "film";
+    if(mode === "recherche")
+      return box.innerHTML = vide("Aucun "+quoi+" pour « "+esc(decQ)+" »","Vérifie l'orthographe, ou essaie le titre original.");
+    return box.innerHTML = vide("Aucun "+quoi+" ici","Change de filtre, ou reviens plus tard — tout ce qui sortait est peut-être déjà dans ta liste.");
+  }
+
+  const intro = mode === "recherche"
     ? "Résultats pour « "+esc(decQ)+" ». Le + ajoute directement à ta liste."
-    : ong==="sorties"
-    ? "Films au cinéma et séries diffusées en ce moment. Ce que tu suis déjà est écarté."
-    : "Construit à partir des titres de ta liste. Ce que tu as déjà commencé ou vu pèse le double.";
+    : INTROS[decOnglet+":"+decFiltre];
 
   box.innerHTML = `<p style="font-size:13px;color:var(--brume);margin-bottom:14px">${intro}</p>
   <div class="cartes">${items.map(x=>{
     const dedans = dansMaListe(x.tmdbId, x.type);
-    const pq = ong==="pourtoi" && x.raisons?.length
+    const pq = decFiltre==="pourtoi" && mode==="filtre" && x.raisons?.length
       ? "d'après "+esc(x.raisons[0])+(x.raisons.length>1?" +"+(x.raisons.length-1):"")
       : (x.annee||"—")+(x.note?" · "+x.note.toFixed(1):"");
     return `<button class="tuile ${dedans?"dedans":""}" data-decadd="${x.type}:${x.tmdbId}" ${dedans?"disabled":""}>
@@ -884,7 +903,7 @@ document.addEventListener("click", e=>{
   }
   if((b=c("[data-dec]"))){ decOnglet=b.dataset.dec; decQ=""; clearTimeout(decTimer); rendre(); return; }
   if((b=c("[data-decf]"))){ decFiltre=b.dataset.decf; rendre(); return; }
-  if(c("[data-decretry]")){ decCache[decOnglet]=null; chargerDecouv(); return; }
+  if(c("[data-decretry]")){ delete decCache[decOnglet+":"+decFiltre]; chargerDecouv(); return; }
   if((b=c("[data-decadd]"))){
     const [type, idStr] = b.dataset.decadd.split(":"); const id = Number(idStr);
     if(dansMaListe(id,type)) return;
@@ -898,7 +917,7 @@ document.addEventListener("click", e=>{
         if(type==="series") D.series.push(await importerSerie(id));
         else D.films.push(await importerFilm(id));
         sauver();
-        invaliderSuggestions(); decCache.sorties = null;
+        invaliderSuggestions();
         if(enFiche){ fermer(); rendre(); toast(type==="series" ? "Série ajoutée" : "Film ajouté"); }
         else{
           b.classList.add("dedans"); plus?.remove();
