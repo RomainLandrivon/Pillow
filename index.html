@@ -27,19 +27,22 @@
   --safe-t:env(safe-area-inset-top,0px);
 }
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent;min-width:0}
-html,body{
+html{
   background:var(--nuit);color:var(--ivoire);
-  width:100%;max-width:100%;overflow-x:hidden;   /* rien ne dépasse latéralement */
-  overscroll-behavior-x:none;                     /* pas de rebond horizontal */
-  touch-action:manipulation;                      /* coupe le zoom au double-tap, garde le pincement */
-  -webkit-text-size-adjust:100%;                  /* iOS n'agrandit pas le texte tout seul */
+  -webkit-text-size-adjust:100%;
+  text-size-adjust:100%;
 }
 body{
   font-family:"Instrument Sans",system-ui,sans-serif;
   font-size:15px;line-height:1.45;
   padding-bottom:calc(76px + var(--safe-b));
-  overscroll-behavior-y:none;
+  overflow-x:hidden;                         /* rien ne dépasse latéralement */
+  overscroll-behavior:none;                  /* pas de rebond horizontal ni de pull-to-refresh */
 }
+/* touch-action:manipulation sur html/body coupe le scroll sur Android Chrome.
+   On le pose uniquement sur les zones cliquables — qui gardent le bénéfice
+   iOS de couper le double-tap zoom. */
+button,a,input,select,.tuile,.ep,.ligne{touch-action:manipulation}
 img,svg{max-width:100%}
 h1,h2,h3{font-family:"Bricolage Grotesque",system-ui,sans-serif;letter-spacing:-.02em;line-height:1.05}
 .mono{font-family:"IBM Plex Mono",monospace}
@@ -1098,9 +1101,10 @@ document.addEventListener("click", e=>{
   if((b=c("[data-decadd]"))){
     const [type, idStr] = b.dataset.decadd.split(":"); const id = Number(idStr);
     if(dansMaListe(id,type)) return;
-    // b est soit le bouton "+" dans une tuile Découverte, soit "Ajouter" dans la fiche descriptive
-    const enFiche = !!b.closest(".sheet");
-    const tuile = enFiche ? null : b.closest(".tuile");
+    // Le vrai critère : le bouton est-il dans une tuile ?
+    // - Oui (Découverte, fiche personne) : on marque la tuile "dedans" sans quitter la vue
+    // - Non (bouton "Ajouter à ma liste" pleine largeur dans une fiche descriptive) : fermer
+    const tuile = b.closest(".tuile");
     b.innerHTML = '<span class="spin" style="width:13px;height:13px;border-width:2px;border-color:rgba(42,29,7,.3);border-top-color:#2A1D07"></span>';
     b.disabled = true;
     (async()=>{
@@ -1109,12 +1113,13 @@ document.addEventListener("click", e=>{
         else D.films.push(await importerFilm(id));
         sauver();
         invaliderSuggestions();
-        if(enFiche){ fermer(); rendre(); toast(type==="series" ? "Série ajoutée" : "Film ajouté"); }
-        else{
-          tuile?.classList.add("dedans");
+        if(tuile){
+          tuile.classList.add("dedans");
           b.remove();
-          const pq = tuile?.querySelector(".pq"); if(pq) pq.textContent = "déjà dans ta liste";
+          const pq = tuile.querySelector(".pq"); if(pq) pq.textContent = "déjà dans ta liste";
           toast(type==="series" ? "Série ajoutée" : "Film ajouté");
+        } else {
+          fermer(); rendre(); toast(type==="series" ? "Série ajoutée" : "Film ajouté");
         }
       }catch(err){ b.disabled=false; b.textContent="+"; toast(err.message); }
     })();
