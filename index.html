@@ -44,7 +44,7 @@ img,svg{max-width:100%}
 h1,h2,h3{font-family:"Bricolage Grotesque",system-ui,sans-serif;letter-spacing:-.02em;line-height:1.05}
 .mono{font-family:"IBM Plex Mono",monospace}
 button{font:inherit;color:inherit;background:none;border:none;cursor:pointer}
-input,select{font:inherit;color:var(--ivoire);background:var(--nuit-2);border:1px solid var(--bord);border-radius:10px;padding:11px 13px;width:100%}
+input,select{font:inherit;font-size:16px;color:var(--ivoire);background:var(--nuit-2);border:1px solid var(--bord);border-radius:10px;padding:11px 13px;width:100%}
 input:focus,select:focus,button:focus-visible{outline:2px solid var(--beurre);outline-offset:2px}
 input::placeholder{color:var(--brume)}
 
@@ -99,6 +99,13 @@ nav button.on{color:var(--beurre)}
 .tuile .masquer{position:absolute;right:6px;top:6px;width:24px;height:24px;border-radius:50%;background:rgba(25,18,33,.85);border:1px solid var(--bord);color:var(--ivoire);font-size:16px;line-height:1;display:grid;place-items:center;font-weight:600}
 .tuile .masquer:active{background:var(--nuit-3)}
 .tuile .pastille-sortie{position:absolute;left:6px;right:6px;bottom:6px;background:rgba(25,18,33,.9);border:1px solid var(--beurre);color:var(--beurre);font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:600;letter-spacing:.02em;padding:4px 6px;border-radius:6px;text-align:center;text-transform:uppercase}
+
+/* ---- rail des personnes (recherche) ---- */
+.pers{flex:0 0 82px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:6px;padding:0}
+.pers-photo{width:78px;height:78px;border-radius:50%;background-color:var(--nuit-3);background-size:cover;background-position:center;border:1px solid var(--bord)}
+.pers-nom{font-size:12.5px;font-weight:600;line-height:1.2;color:var(--ivoire);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.pers-role{font-family:"IBM Plex Mono",monospace;font-size:9.5px;color:var(--brume);letter-spacing:.03em}
+.pers:active .pers-photo{transform:scale(.94);transition:transform .12s}
 .tuile .marque{position:absolute;left:6px;top:6px;font-family:"IBM Plex Mono",monospace;font-size:9px;font-weight:600;letter-spacing:.06em;padding:2px 6px;border-radius:999px;background:rgba(25,18,33,.85);color:var(--ivoire);border:1px solid var(--bord)}
 .tuile .nom{font-size:13px;font-weight:600;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .tuile .pq{font-family:"IBM Plex Mono",monospace;font-size:10px;color:var(--brume);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -315,13 +322,30 @@ const versTuile = (r,type) => ({
 });
 
 async function chercherTuiles(q){
-  const [s,f] = await Promise.all([
-    tmdb("/search/tv",   {query:q, include_adult:"false"}).catch(()=>({results:[]})),
-    tmdb("/search/movie",{query:q, include_adult:"false"}).catch(()=>({results:[]})),
+  const [s,f,p] = await Promise.all([
+    tmdb("/search/tv",     {query:q, include_adult:"false"}).catch(()=>({results:[]})),
+    tmdb("/search/movie",  {query:q, include_adult:"false"}).catch(()=>({results:[]})),
+    tmdb("/search/person", {query:q, include_adult:"false"}).catch(()=>({results:[]})),
   ]);
+  const roleFr = d => d==="Directing" ? "Réalisation"
+                    : d==="Acting"    ? "Interprétation"
+                    : d==="Writing"   ? "Écriture"
+                    : d==="Production"? "Production"
+                    : d || "";
   return {
     series:(s.results||[]).map(r=>versTuile(r,"series")).filter(x=>x.titre),
     films: (f.results||[]).map(r=>versTuile(r,"films")).filter(x=>x.titre),
+    // On garde les personnes populaires qui ont au moins une œuvre connue.
+    // Sans "known_for", TMDB retourne parfois des homonymes vides — inutiles ici.
+    personnes: (p.results||[])
+      .filter(r => r.known_for?.length && r.profile_path)
+      .slice(0,4)
+      .map(r=>({
+        tmdbId: r.id,
+        nom: r.name,
+        role: roleFr(r.known_for_department),
+        photo: r.profile_path,
+      })),
   };
 }
 
@@ -496,11 +520,19 @@ async function ficheDescription(type, tmdbId, localId){
     <div id="fiche"><div style="padding:40px;text-align:center"><span class="spin"></span></div></div>`,
     async el=>{
       const box = el.querySelector("#fiche");
-      let d = null, cast = [], trailer = null;
+      let d = null, cast = [], trailer = null, realisation = "";
       if(tmdbId && aCle()){
         try{
           d = await tmdb("/"+(type==="series"?"tv":"movie")+"/"+tmdbId, {append_to_response:"credits,videos"});
           cast = (d.credits?.cast||[]).slice(0,6).map(c=>c.name);
+          // Films : le réalisateur est dans crew.job === "Director".
+          // Séries : la notion équivalente est le/les créateur(s), rangés dans created_by.
+          if(type==="films"){
+            const dir = (d.credits?.crew||[]).find(c=>c.job==="Director");
+            realisation = dir?.name || "";
+          } else {
+            realisation = (d.created_by||[]).map(c=>c.name).join(", ");
+          }
           const vids = d.videos?.results||[];
           trailer = vids.find(v=>v.type==="Trailer" && v.site==="YouTube" && v.official)
                  || vids.find(v=>v.type==="Trailer" && v.site==="YouTube")
@@ -543,6 +575,10 @@ async function ficheDescription(type, tmdbId, localId){
           </div>
         </div>
         ${overview ? `<p style="font-size:14px;line-height:1.55;margin-bottom:16px">${esc(overview)}</p>` : ""}
+        ${realisation ? `<div style="margin-bottom:14px">
+          <div class="eyebrow" style="margin-bottom:5px">${type==="films"?"Réalisation":"Création"}</div>
+          <div style="font-size:13.5px;color:var(--brume)">${esc(realisation)}</div>
+        </div>` : ""}
         ${cast.length ? `<div style="margin-bottom:16px">
           <div class="eyebrow" style="margin-bottom:5px">Avec</div>
           <div style="font-size:13.5px;color:var(--brume)">${cast.map(esc).join(" · ")}</div>
@@ -554,6 +590,75 @@ async function ficheDescription(type, tmdbId, localId){
         ${actions}
         ${!overview && !cast.length && !trailerUrl && !aCle() ? `<p style="font-size:13px;color:var(--brume);text-align:center;padding:20px 0">Ajoute une clé TMDB dans Réglages pour voir le synopsis, les acteurs et la bande-annonce.</p>` : ""}
       `;
+    });
+}
+
+// Fiche personne : liste ses films et séries les plus notables.
+// combined_credits renvoie 'cast' (rôles d'interprétation) et 'crew' (équipe technique).
+// Pour un réalisateur, l'utile vit dans crew (jobs Director/Writer). Pour un acteur, dans cast.
+async function fichePersonne(personneId, nom){
+  feuille(`<div class="poignee"></div>
+    <div id="fpers"><div style="padding:40px;text-align:center"><span class="spin"></span></div></div>`,
+    async el=>{
+      const box = el.querySelector("#fpers");
+      try{
+        const d = await tmdb("/person/"+personneId, {append_to_response:"combined_credits"});
+        const c = d.combined_credits || {};
+        // On regroupe les crédits par titre (un même film peut apparaître comme réalisateur
+        // ET scénariste — on le compte une fois) et on garde le rôle le plus parlant.
+        const seen = new Map();
+        const ajoute = (r, role) => {
+          const k = r.media_type + ":" + r.id;
+          if(seen.has(k)) return;
+          if(!r.poster_path) return;   // sans affiche, la grille devient triste
+          if((r.vote_count||0) < 20) return; // titres trop confidentiels
+          seen.set(k, {
+            tmdbId: r.id,
+            type: r.media_type === "tv" ? "series" : "films",
+            titre: r.title || r.name,
+            annee: (r.release_date||r.first_air_date||"").slice(0,4),
+            poster: r.poster_path,
+            note: r.vote_average || 0,
+            votes: r.vote_count || 0,
+            role,
+            pop: r.popularity || 0,
+          });
+        };
+        // Rôles techniques prioritaires : réalisation, écriture, création
+        for(const cr of (c.crew||[])){
+          if(cr.job === "Director") ajoute(cr, "Réalisation");
+          else if(cr.job === "Writer" || cr.job === "Screenplay") ajoute(cr, "Scénario");
+        }
+        // Puis les rôles d'interprétation
+        for(const cr of (c.cast||[])) ajoute(cr, cr.character ? "Rôle : "+cr.character : "Interprétation");
+        const items = [...seen.values()].sort((a,b)=> b.pop - a.pop).slice(0,30);
+
+        const bio = d.biography ? (d.biography.length > 260 ? d.biography.slice(0,257)+"…" : d.biography) : "";
+        box.innerHTML = `
+          <div class="row" style="margin-bottom:18px;align-items:center">
+            <div class="pers-photo" style="width:88px;height:88px;flex:0 0 88px;${d.profile_path?`background-image:url(https://image.tmdb.org/t/p/w185${d.profile_path})`:""}"></div>
+            <div style="flex:1;min-width:0">
+              <h2 style="font-size:20px">${esc(d.name||nom)}</h2>
+              ${d.known_for_department ? `<div class="mono" style="font-size:11.5px;color:var(--brume);margin-top:5px;letter-spacing:.04em">${esc(d.known_for_department)}</div>` : ""}
+            </div>
+          </div>
+          ${bio ? `<p style="font-size:13.5px;line-height:1.55;color:var(--brume);margin-bottom:18px">${esc(bio)}</p>` : ""}
+          <div class="eyebrow" style="margin-bottom:11px">Œuvres notables</div>
+          ${items.length ? `<div class="cartes">${items.map(x=>{
+            const dedans = dansMaListe(x.tmdbId, x.type);
+            return `<div class="tuile ${dedans?"dedans":""}" data-fdec="${x.type}:${x.tmdbId}">
+              <div class="aff" style="background-image:url(${img(x.poster)})">
+                <span class="marque">${x.type==="series"?"SÉRIE":"FILM"}</span>
+                ${dedans?"":`<button class="plus" data-decadd="${x.type}:${x.tmdbId}" aria-label="Ajouter à ma liste">+</button>`}
+              </div>
+              <div style="min-width:0">
+                <div class="nom">${esc(x.titre)}</div>
+                <div class="pq">${dedans?"déjà dans ta liste":esc(x.role)}</div>
+              </div>
+            </div>`;
+          }).join("")}</div>` : `<p style="font-size:13.5px;color:var(--brume)">Aucune œuvre suffisamment notable trouvée.</p>`}
+        `;
+      }catch(e){ box.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
     });
 }
 
@@ -650,7 +755,25 @@ function peindreDecouv(d, mode){
     ? "Résultats pour « "+esc(decQ)+" ». Le + ajoute directement à ta liste."
     : INTROS[decOnglet+":"+decFiltre];
 
+  // En mode recherche, on présente d'abord les personnes trouvées (réalisatrices,
+  // acteurs) en petit rail au-dessus des affiches. Ça permet de retrouver
+  // des œuvres par nom sans avoir à connaître le titre.
+  const railPersonnes = (mode==="recherche" && d.personnes?.length)
+    ? `<div style="margin-bottom:18px">
+        <div class="eyebrow" style="margin-bottom:9px">Personnes</div>
+        <div style="display:flex;gap:14px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none">
+          ${d.personnes.map(p=>`
+            <button class="pers" data-personne="${p.tmdbId}:${encodeURIComponent(p.nom)}">
+              <div class="pers-photo" style="background-image:url(https://image.tmdb.org/t/p/w185${p.photo})"></div>
+              <div class="pers-nom">${esc(p.nom)}</div>
+              <div class="pers-role">${esc(p.role||"")}</div>
+            </button>`).join("")}
+        </div>
+      </div>`
+    : "";
+
   box.innerHTML = `<p style="font-size:13px;color:var(--brume);margin-bottom:14px">${intro}</p>
+  ${railPersonnes}
   <div class="cartes">${items.map(x=>{
     const dedans = dansMaListe(x.tmdbId, x.type);
     const pq = decFiltre==="pourtoi" && mode==="filtre" && x.raisons?.length
@@ -1042,6 +1165,11 @@ document.addEventListener("click", e=>{
   if((b=c("[data-fdec]"))){
     const [type, idStr] = b.dataset.fdec.split(":");
     ficheDescription(type, Number(idStr));
+    return;
+  }
+  if((b=c("[data-personne]"))){
+    const [idStr, nomEnc] = b.dataset.personne.split(":");
+    fichePersonne(Number(idStr), decodeURIComponent(nomEnc||""));
     return;
   }
   if((b=c("[data-htf]"))){ histFilmTri=b.dataset.htf; rendre(); return; }
