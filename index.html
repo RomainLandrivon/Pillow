@@ -199,6 +199,15 @@ function sauver(){
   try{ localStorage.setItem(CLE, JSON.stringify(D)); }
   catch(e){ toast("Sauvegarde impossible — stockage plein ?"); }
 }
+// Taille approximative des données stockées, en Ko. Safari plafonne autour de 5 Mo
+// par origine, Chrome et Firefox sont beaucoup plus généreux — on prend 5 Mo comme
+// référence prudente, ça couvre le pire cas.
+function tailleStockage(){
+  try{
+    const s = localStorage.getItem(CLE) || "";
+    return Math.round(new Blob([s]).size / 1024);
+  }catch(e){ return 0; }
+}
 // la liste a changé : les suggestions doivent être recalculées
 function invaliderSuggestions(){ decCache = {}; }
 const uid = () => Math.random().toString(36).slice(2,10);
@@ -267,6 +276,14 @@ function totalMinSerie(s){
       if(s.vus[cle(sa.n,ep.n)]) t += ep.duree || 42;
   return t;
 }
+// Année de diffusion d'une saison. Priorité au champ direct (nouvelles séries
+// importées avec sa.date), sinon on déduit depuis le premier épisode qui a une date.
+// Les séries importées avant cette version n'ont pas sa.date : le fallback suffit.
+function anneeSaison(sa){
+  if(sa.date) return sa.date.slice(0,4);
+  const ep = sa.episodes.find(e => e.date);
+  return ep ? ep.date.slice(0,4) : "";
+}
 function marquer(s, sn, en, val){
   const k = cle(sn,en);
   if(val) s.vus[k] = new Date().toISOString();
@@ -301,7 +318,7 @@ async function importerSerie(id){
   const saisons = await Promise.all(utiles.map(async s=>{
     try{
       const sd = await tmdb("/tv/"+id+"/season/"+s.season_number);
-      return { n:s.season_number, episodes:(sd.episodes||[]).map(e=>({n:e.episode_number, titre:e.name||"", duree:e.runtime||null, date:e.air_date||null})) };
+      return { n:s.season_number, date:sd.air_date||null, episodes:(sd.episodes||[]).map(e=>({n:e.episode_number, titre:e.name||"", duree:e.runtime||null, date:e.air_date||null})) };
     }catch(e){
       return { n:s.season_number, episodes:Array.from({length:s.episode_count},(_,i)=>({n:i+1, titre:"", duree:null, date:null})) };
     }
@@ -953,7 +970,7 @@ function histSeries(){
           const vus = sa.episodes.filter(e=>s.vus[cle(sa.n,e.n)]);
           return `<button class="ligne sous" data-hsa="${k}" aria-expanded="${so}">
             ${chev(so, 13)}
-            <span class="mono" style="flex:1;text-align:left;font-size:13px;font-weight:600;color:var(--beurre)">Saison ${sa.n}</span>
+            <span class="mono" style="flex:1;text-align:left;font-size:13px;font-weight:600;color:var(--beurre)">Saison ${sa.n}${anneeSaison(sa)?" · "+anneeSaison(sa):""}</span>
             <span class="mono" style="font-size:11px;color:var(--brume)">${vus.length}/${sa.episodes.length}</span>
           </button>
           ${so ? `<div style="padding:2px 0 8px 22px">
@@ -1023,7 +1040,8 @@ function vueReglages(){
 
   <div class="card" style="padding:17px;margin-bottom:14px">
     <h3 style="font-size:17px;margin-bottom:5px">Tes données</h3>
-    <p style="font-size:13.5px;color:var(--brume);margin-bottom:12px">${D.series.length} série${D.series.length>1?"s":""} · ${D.films.length} film${D.films.length>1?"s":""}. Tout est stocké dans ce navigateur. Exporte de temps en temps.</p>
+    <p style="font-size:13.5px;color:var(--brume);margin-bottom:6px">${D.series.length} série${D.series.length>1?"s":""} · ${D.films.length} film${D.films.length>1?"s":""}. Tout est stocké dans ce navigateur.</p>
+    <p class="mono" style="font-size:11.5px;color:${tailleStockage()>4000?"var(--rose)":"var(--brume)"};margin-bottom:12px">${tailleStockage()} Ko utilisés · environ ${Math.min(99, Math.round(tailleStockage()/50))}% de l'espace disponible${tailleStockage()>4000?" · pense à exporter":""}</p>
     <div style="display:flex;gap:8px">
       <button class="btn ghost" style="flex:1" id="exp">Exporter</button>
       <button class="btn ghost" style="flex:1" id="imp">Importer</button>
@@ -1056,9 +1074,10 @@ function detail(id, scroll=0){
     <p style="font-size:13px;color:var(--brume);margin-bottom:14px">Tape une case pour cocher ou décocher un épisode.</p>
     ${s.saisons.map(sa=>{
       const vs = sa.episodes.filter(e=>s.vus[cle(sa.n,e.n)]).length;
+      const an = anneeSaison(sa);
       return `<div style="margin-bottom:18px">
         <div style="display:flex;align-items:baseline;gap:9px;margin-bottom:9px">
-          <span class="mono" style="font-size:12.5px;font-weight:600">Saison ${sa.n}</span>
+          <span class="mono" style="font-size:12.5px;font-weight:600">Saison ${sa.n}${an?" · "+an:""}</span>
           <span style="flex:1;height:1px;background:var(--bord)"></span>
           <span class="mono" style="font-size:11px;color:${vs===sa.episodes.length?"var(--beurre)":"var(--brume)"}">${vs}/${sa.episodes.length}</span>
           <button class="mono" style="font-size:11px;color:var(--brume)" data-saison="${sa.n}">${vs===sa.episodes.length?"Tout décocher":"Tout cocher"}</button>
