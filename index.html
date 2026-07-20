@@ -178,6 +178,8 @@ let histSerieOuv = new Set();   // séries dépliées dans l'historique
 let histSaisonOuv = new Set();  // saisons dépliées, clé "idSerie:n"
 let histFilmTri = "sortie";   // "vu" ou "sortie"
 let histSerieTri = "vu";      // "vu" ou "sortie"
+let filmOnglet = "sorti";     // "sorti" ou "attente"
+let serieOnglet = "sorti";
 let decOnglet = "series";   // series | films
 let decFiltre = "pourtoi";  // moment | avenir | top | pourtoi
 let decGenre = null;        // ID TMDB du genre actif, null = tous
@@ -576,10 +578,32 @@ function rendreNav(){
 
 /* ---- page Séries : uniquement l'épisode suivant ---- */
 function vueSeries(){
-  const actives = D.series.filter(s=>!fini(s))
-    .sort((a,b)=> derniereActivite(b).localeCompare(derniereActivite(a)));
+  const actives = D.series.filter(s=>!fini(s));
   if(!actives.length) return vide("Aucune série en cours","Ajoute une série avec le bouton +. L'épisode suivant s'affichera ici, prêt à cocher.");
-  return actives.map(s=>{
+  // Une série est "en attente" si son prochain épisode n'est pas encore diffusé.
+  // Sans épisode suivant (théoriquement impossible ici puisqu'elle n'est pas finie), on la place en "sorti".
+  const sortis  = actives.filter(s => { const ep = suivant(s); return !ep || !epFutur(ep); });
+  const attente = actives.filter(s => { const ep = suivant(s); return ep && epFutur(ep); });
+  const liste = serieOnglet === "sorti" ? sortis : attente;
+  if(serieOnglet === "sorti"){
+    liste.sort((a,b)=> derniereActivite(b).localeCompare(derniereActivite(a)));
+  } else {
+    // Croissant : la plus proche sortie en premier
+    liste.sort((a,b)=> (suivant(a)?.date||"9999").localeCompare(suivant(b)?.date||"9999"));
+  }
+
+  const chips = `<div style="display:flex;gap:7px;margin-bottom:14px">
+    <button class="chip ${serieOnglet==='sorti'?'on':''}" data-so="sorti">Déjà sorti · ${sortis.length}</button>
+    <button class="chip ${serieOnglet==='attente'?'on':''}" data-so="attente">Pas encore sorti · ${attente.length}</button>
+  </div>`;
+
+  if(!liste.length){
+    return chips + `<div class="vide" style="padding:32px 22px"><p style="font-size:14px">${serieOnglet==='sorti'
+      ? "Tout ce que tu suis est encore à venir. Bascule sur l'autre onglet."
+      : "Rien à venir — tout ce que tu suis est disponible."}</p></div>`;
+  }
+
+  return chips + liste.map(s=>{
     const ep = suivant(s), t = totalEp(s), v = nbVus(s);
     const p = t ? Math.round(v/t*100) : 0;
     const code = "S"+String(ep.saison).padStart(2,"0")+"E"+String(ep.n).padStart(2,"0");
@@ -608,10 +632,29 @@ function vueSeries(){
 
 /* ---- page Films ---- */
 function vueFilms(){
-  const a = D.films.filter(f=>!f.vuLe)
-    .sort((a,b)=> (b.annee||"0").localeCompare(a.annee||"0") || a.titre.localeCompare(b.titre));
-  if(!a.length) return vide("Aucun film à voir","Ajoute un film avec le bouton +. Une fois vu, il part dans l'historique.");
-  return `<div class="cartes trois">${a.map(f=>{
+  const tous = D.films.filter(f=>!f.vuLe);
+  if(!tous.length) return vide("Aucun film à voir","Ajoute un film avec le bouton +. Une fois vu, il part dans l'historique.");
+  const sortis  = tous.filter(f => !filmFutur(f));
+  const attente = tous.filter(f =>  filmFutur(f));
+  const liste = filmOnglet === "sorti" ? sortis : attente;
+  if(filmOnglet === "sorti"){
+    liste.sort((a,b)=> (b.annee||"0").localeCompare(a.annee||"0") || a.titre.localeCompare(b.titre));
+  } else {
+    liste.sort((a,b)=> (a.date||"9999").localeCompare(b.date||"9999"));
+  }
+
+  const chips = `<div style="display:flex;gap:7px;margin-bottom:14px">
+    <button class="chip ${filmOnglet==='sorti'?'on':''}" data-fo="sorti">Déjà sorti · ${sortis.length}</button>
+    <button class="chip ${filmOnglet==='attente'?'on':''}" data-fo="attente">Pas encore sorti · ${attente.length}</button>
+  </div>`;
+
+  if(!liste.length){
+    return chips + `<div class="vide" style="padding:32px 22px"><p style="font-size:14px">${filmOnglet==='sorti'
+      ? "Tout ce que tu suis est encore à venir. Bascule sur l'autre onglet."
+      : "Rien à venir — tout ce que tu suis est déjà disponible."}</p></div>`;
+  }
+
+  return chips + `<div class="cartes trois">${liste.map(f=>{
     const futur = filmFutur(f);
     return `<div class="tuile ${futur?"attente":""}" data-ffiche="films:${f.id}">
       <div class="aff" style="${f.poster?`background-image:url(${img(f.poster)})`:""}">
@@ -1377,6 +1420,8 @@ document.addEventListener("click", e=>{
   }
   if((b=c("[data-htf]"))){ histFilmTri=b.dataset.htf; rendre(); return; }
   if((b=c("[data-hts]"))){ histSerieTri=b.dataset.hts; rendre(); return; }
+  if((b=c("[data-fo]"))){ filmOnglet=b.dataset.fo; rendre(); return; }
+  if((b=c("[data-so]"))){ serieOnglet=b.dataset.so; rendre(); return; }
 
   if(c("#fab")){ ajouter(); return; }
 
