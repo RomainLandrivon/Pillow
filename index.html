@@ -122,6 +122,8 @@ nav button.on{color:var(--beurre)}
 @media (prefers-reduced-motion:reduce){.chev{transition:none}}
 .chip{font-size:12.5px;font-weight:600;padding:7px 14px;border-radius:999px;border:1px solid var(--bord);color:var(--brume)}
 .chip.on{background:var(--nuit-3);color:var(--beurre);border-color:var(--beurre)}
+.decraf{flex:0 0 34px;width:34px;height:34px;border-radius:50%;background:var(--nuit-3);border:1px solid var(--bord);color:var(--brume);display:grid;place-items:center}
+.decraf:active{transform:rotate(180deg);transition:transform .3s cubic-bezier(.3,1.4,.5,1)}
 .pill{display:inline-block;font-size:11px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;padding:3px 8px;border-radius:999px;border:1px solid var(--bord);color:var(--brume)}
 .bar{height:3px;background:var(--nuit-3);border-radius:999px;overflow:hidden}
 .bar i{display:block;height:100%;background:var(--beurre);border-radius:999px}
@@ -178,7 +180,9 @@ let histFilmTri = "sortie";   // "vu" ou "sortie"
 let histSerieTri = "vu";      // "vu" ou "sortie"
 let decOnglet = "series";   // series | films
 let decFiltre = "pourtoi";  // moment | avenir | top | pourtoi
-let decCache = {};          // indexé par "onglet:filtre"
+let decGenre = null;        // ID TMDB du genre actif, null = tous
+let decGenres = { tv: null, movie: null };  // listes chargées à la demande
+let decCache = {};          // indexé par "onglet:filtre:genre"
 let decQ = "";              // recherche en cours dans Découverte
 let decTimer;
 let ouvert = null;
@@ -309,6 +313,48 @@ async function importerFilm(id){
   return { id:uid(), tmdbId:id, titre:d.title, annee:(d.release_date||"").slice(0,4), poster:d.poster_path, duree:d.runtime||null, date:d.release_date||null, vuLe:null, ajoute:new Date().toISOString() };
 }
 
+// TVmaze : comble les trous laissés par TMDB sur les données d'épisodes.
+// Titres génériques ("Episode 4"), durées absentes, dates manquantes : c'est là que
+// TVmaze est meilleur. API gratuite, sans clé, CORS OK.
+async function enrichirTVmaze(serie){
+  if(!serie.tmdbId) return 0;
+  if(serie.tvmazeEnrichi) return 0;
+  try{
+    const ext = await tmdb("/tv/"+serie.tmdbId+"/external_ids");
+    if(!ext?.tvdb_id){ serie.tvmazeEnrichi = true; sauver(); return 0; }
+
+    const showRes = await fetch("https://api.tvmaze.com/lookup/shows?thetvdb="+ext.tvdb_id);
+    if(!showRes.ok){ serie.tvmazeEnrichi = true; sauver(); return 0; }
+    const show = await showRes.json();
+    if(!show?.id){ serie.tvmazeEnrichi = true; sauver(); return 0; }
+
+    const epRes = await fetch("https://api.tvmaze.com/shows/"+show.id+"/episodes");
+    if(!epRes.ok) return 0;
+    const epsTv = await epRes.json();
+
+    // Le pattern "Episode 12" est un titre générique que TMDB pose faute de mieux.
+    // On l'écrase si TVmaze a un vrai nom.
+    const generique = /^(episode|épisode)\s+\d+$/i;
+    let combles = 0;
+    for(const epTv of epsTv){
+      const sa = serie.saisons.find(s => s.n === epTv.season);
+      if(!sa) continue;
+      const ep = sa.episodes.find(e => e.n === epTv.number);
+      if(!ep) continue;
+
+      if((!ep.titre || generique.test(ep.titre)) && epTv.name){ ep.titre = epTv.name; combles++; }
+      if(!ep.duree && epTv.runtime){ ep.duree = epTv.runtime; combles++; }
+      if(!ep.date  && epTv.airdate){ ep.date  = epTv.airdate; combles++; }
+    }
+    serie.tvmazeEnrichi = true;
+    sauver();
+    return combles;
+  }catch(e){
+    console.warn("TVmaze :", serie.titre, e);
+    return 0;
+  }
+}
+
 /* ============ découverte ============ */
 const dansMaListe = (id,type) => type==="series" ? D.series.some(s=>s.tmdbId===id) : D.films.some(f=>f.tmdbId===id);
 // écarté à l'affichage et au chargement : ce que l'utilisatrice a masqué avec le "−"
@@ -322,6 +368,7 @@ const versTuile = (r,type) => ({
   poster:r.poster_path,
   note:r.vote_average||0,
   votes:r.vote_count||0,
+  genres:r.genre_ids||[],
 });
 
 async function chercherTuiles(q){
@@ -352,34 +399,54 @@ async function chercherTuiles(q){
   };
 }
 
-// Endpoints TMDB pour chaque paire (onglet, filtre).
-// Les paramètres dynamiques (dates) sont générés à l'appel, pas au chargement du fichier.
-const ENDPOINTS = {
-  series: {
-    moment: () => ["/tv/on_the_air", {}],
-    avenir: () => ["/discover/tv", {
-      "first_air_date.gte": new Date().toISOString().slice(0,10),
-      "sort_by": "popularity.desc",
-    }],
-    top:    () => ["/tv/top_rated", {}],
-  },
-  films: {
-    moment: () => ["/movie/now_playing", {}],
-    avenir: () => ["/movie/upcoming", {}],
-    top:    () => ["/movie/top_rated", {}],
-  },
-};
+// Helpers de date : format ISO tronqué au jour est ce qu'accepte TMDB.
+const dateJour = () => new Date().toISOString().slice(0,10);
+const dateJourMoins = j => new Date(Date.now() - j*86400000).toISOString().slice(0,10);
 
-async function chargerFiltre(onglet, filtre){
-  if(filtre === "pourtoi") return await pourToiFiltre(onglet);
-  const [chemin, params] = ENDPOINTS[onglet][filtre]();
-  const items = [];
-  // On pagine pour avoir de quoi remplir la grille même après avoir retiré
-  // les titres déjà dans la liste. Trois pages suffisent en pratique.
-  for(let p=1; p<=3; p++){
+// Chemin et paramètres pour un filtre + genre. Sans genre : endpoints classiques
+// (curatés, souvent meilleurs). Avec genre : /discover, seul endpoint TMDB
+// qui accepte with_genres.
+function endpointPour(onglet, filtre, genre){
+  if(!genre){
+    if(onglet === "series"){
+      if(filtre === "moment") return ["/tv/on_the_air", {}];
+      if(filtre === "avenir") return ["/discover/tv", { "first_air_date.gte":dateJour(), sort_by:"popularity.desc" }];
+      if(filtre === "top")    return ["/tv/top_rated", {}];
+    } else {
+      if(filtre === "moment") return ["/movie/now_playing", {}];
+      if(filtre === "avenir") return ["/movie/upcoming", {}];
+      if(filtre === "top")    return ["/movie/top_rated", {}];
+    }
+  }
+  if(onglet === "series"){
+    const p = { with_genres:String(genre), sort_by:"popularity.desc" };
+    if(filtre === "avenir"){ p["first_air_date.gte"] = dateJour(); }
+    else if(filtre === "moment"){ p["air_date.gte"] = dateJourMoins(365); p["air_date.lte"] = dateJour(); }
+    else if(filtre === "top"){ p.sort_by = "vote_average.desc"; p["vote_count.gte"] = "200"; }
+    return ["/discover/tv", p];
+  }
+  const p = { with_genres:String(genre), sort_by:"popularity.desc" };
+  if(filtre === "avenir"){ p["primary_release_date.gte"] = dateJour(); }
+  else if(filtre === "moment"){ p["primary_release_date.gte"] = dateJourMoins(180); p["primary_release_date.lte"] = dateJour(); }
+  else if(filtre === "top"){ p.sort_by = "vote_average.desc"; p["vote_count.gte"] = "500"; }
+  return ["/discover/movie", p];
+}
+
+// Chargement d'un filtre. Options :
+//  - genre : ID TMDB pour /discover
+//  - pageDebut : par où commencer (utilisé par "Voir plus")
+//  - aleatoire : si true et pageDebut absent, pioche 1..5 pour varier
+async function chargerFiltre(onglet, filtre, options={}){
+  if(filtre === "pourtoi") return await pourToiFiltre(onglet, options);
+  const { genre = null, pageDebut = null, aleatoire = false } = options;
+  const start = pageDebut ?? (aleatoire ? Math.floor(Math.random()*5)+1 : 1);
+  const [chemin, params] = endpointPour(onglet, filtre, genre);
+  const items = [], pages = [];
+  for(let p = start; p < start+3; p++){
     let d;
-    try{ d = await tmdb(chemin, {page:String(p), ...params}); }
-    catch(e){ if(p===1) throw e; break; }
+    try{ d = await tmdb(chemin, { ...params, page:String(p) }); }
+    catch(e){ if(p===start) throw e; break; }
+    pages.push(p);
     for(const r of (d.results||[])){
       const t = versTuile(r, onglet);
       if(ecarte(t.tmdbId, onglet)) continue;
@@ -388,16 +455,21 @@ async function chargerFiltre(onglet, filtre){
     if(items.length >= 24) break;
     if(!(d.results||[]).length) break;
   }
-  return { items: items.slice(0,24) };
+  return { items: items.slice(0,24), pages };
 }
 
-// Recommandations basées sur les titres de la liste, filtrées par type.
-async function pourToiFiltre(onglet){
+// Pour toi : le seed décale la fenêtre de sources. Après 3 refreshs, on a
+// exploré 24 titres sources différents parmi ta liste.
+async function pourToiFiltre(onglet, options={}){
+  const { seed = 0, genre = null } = options;
   const sources = onglet === "series"
     ? D.series.filter(s=>s.tmdbId).map(s=>({id:s.tmdbId, titre:s.titre, poids:nbVus(s)>0?2:1}))
     : D.films.filter(f=>f.tmdbId).map(f=>({id:f.tmdbId, titre:f.titre, poids:f.vuLe?2:1}));
   if(!sources.length) return { vide:true, items:[] };
-  const choix = sources.sort((a,b)=>b.poids-a.poids).slice(0,8);
+  sources.sort((a,b)=>b.poids-a.poids);
+  const decalage = (seed * 8) % Math.max(sources.length,1);
+  const choix = [];
+  for(let i=0; i<8 && i<sources.length; i++) choix.push(sources[(decalage+i) % sources.length]);
   const type = onglet === "series" ? "tv" : "movie";
   const lots = await Promise.all(choix.map(async src=>{
     try{
@@ -409,6 +481,8 @@ async function pourToiFiltre(onglet){
   for(const lot of lots) for(const {t,pq,poids} of lot){
     if(ecarte(t.tmdbId, onglet)) continue;
     if(t.votes < 40) continue;
+    // Un genre actif filtre côté client (les /recommendations ne prennent pas with_genres)
+    if(genre && !t.genres.includes(genre)) continue;
     const k = t.tmdbId;
     const e = tally.get(k) || { ...t, score:0, raisons:[] };
     e.score += poids;
@@ -417,6 +491,35 @@ async function pourToiFiltre(onglet){
   }
   const items = [...tally.values()].sort((a,b)=> b.score-a.score || b.note-a.note).slice(0,24);
   return { vide:false, items };
+}
+
+// Listes de genres chargées à la demande, mises en cache pour la session.
+async function chargerGenres(){
+  if(decGenres.tv && decGenres.movie) return;
+  try{
+    const [tv, mv] = await Promise.all([tmdb("/genre/tv/list"), tmdb("/genre/movie/list")]);
+    decGenres.tv = tv.genres || [];
+    decGenres.movie = mv.genres || [];
+  }catch(e){ /* on continuera sans, pas grave */ }
+}
+function nomGenre(id){
+  const liste = decOnglet === "series" ? decGenres.tv : decGenres.movie;
+  return (liste||[]).find(g => g.id === id)?.name || "";
+}
+
+// Feuille modale de sélection du genre. On liste tous les genres du type courant
+// en grille compacte, plus une entrée "Tous les genres" pour réinitialiser.
+function choisirGenre(){
+  const liste = (decOnglet === "series" ? decGenres.tv : decGenres.movie) || [];
+  if(!liste.length){ toast("Genres pas encore chargés — réessaie"); chargerGenres(); return; }
+  const items = [[null, "Tous les genres"], ...liste.map(g=>[g.id, g.name])];
+  feuille(`<div class="poignee"></div>
+    <h2 style="font-size:20px;margin-bottom:14px">Genre</h2>
+    <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px">
+      ${items.map(([id,nom])=>`
+        <button class="btn ${(decGenre===id)?'':'ghost'}" data-choixgenre="${id===null?'':id}" style="padding:11px 8px;font-size:13px;text-align:center">${esc(nom)}</button>
+      `).join("")}
+    </div>`);
 }
 
 /* ============ rendu ============ */
@@ -669,16 +772,25 @@ async function fichePersonne(personneId, nom){
 function vueDecouv(){
   if(!aCle()) return vide("Découverte a besoin d'une clé TMDB","Les sélections viennent de TMDB. Ajoute une clé dans Réglages — c'est gratuit et ça prend cinq minutes.");
   const filtres = [["pourtoi","Pour toi"],["avenir","À venir"],["moment","Du moment"],["top","Mieux évalués"]];
+  const labelGenre = decGenre ? nomGenre(decGenre) : "Tous les genres";
   return `<div style="position:relative;margin-bottom:11px">
-    <input id="decq" placeholder="Chercher un film ou une série" value="${esc(decQ)}" autocomplete="off" style="padding-right:40px">
+    <input id="decq" placeholder="Chercher un film, une série, un acteur…" value="${esc(decQ)}" autocomplete="off" style="padding-right:40px">
     <button id="decx" aria-label="Effacer la recherche" style="display:${decQ?"block":"none"};position:absolute;right:4px;top:0;bottom:0;width:36px;color:var(--brume);font-size:20px">×</button>
   </div>
   <div style="display:flex;gap:8px;margin-bottom:11px">
     <button class="btn ${decOnglet==="series"?"":"ghost"}" style="flex:1;padding:9px" data-dec="series">Séries</button>
     <button class="btn ${decOnglet==="films"?"":"ghost"}" style="flex:1;padding:9px" data-dec="films">Films</button>
   </div>
-  ${decQ?"":`<div style="display:flex;gap:7px;margin-bottom:17px;overflow-x:auto;padding-bottom:4px;scrollbar-width:none">
-    ${filtres.map(([id,lab])=>`<button class="chip ${decFiltre===id?"on":""}" data-decf="${id}" style="flex:0 0 auto;white-space:nowrap">${lab}</button>`).join("")}
+  ${decQ?"":`<div style="display:flex;gap:8px;align-items:center;margin-bottom:11px">
+    <div style="display:flex;gap:7px;overflow-x:auto;flex:1;scrollbar-width:none">
+      ${filtres.map(([id,lab])=>`<button class="chip ${decFiltre===id?"on":""}" data-decf="${id}" style="flex:0 0 auto;white-space:nowrap">${lab}</button>`).join("")}
+    </div>
+    <button class="decraf" id="decraf" aria-label="Rafraîchir les propositions" title="Rafraîchir">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 1 1-3.7-7.3"/><path d="M21 4v5h-5"/></svg>
+    </button>
+  </div>
+  <div style="margin-bottom:17px">
+    <button class="chip ${decGenre?"on":""}" id="decgenre" style="white-space:nowrap">${esc(labelGenre)}${decGenre?" ×":" ▾"}</button>
   </div>`}
   <div id="decRes"></div>`;
 }
@@ -699,6 +811,8 @@ async function chargerDecouv(){
   }
   if(croix) croix.onclick = ()=>{ decQ=""; clearTimeout(decTimer); rendre(); };
 
+  chargerGenres();  // silencieux, en arrière-plan pour le sélecteur
+
   if(decQ){
     const q = decQ;
     box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
@@ -709,13 +823,14 @@ async function chargerDecouv(){
     return;
   }
 
-  const cle = decOnglet+":"+decFiltre;
+  const cle = decOnglet+":"+decFiltre+":"+(decGenre||"tout");
   if(decCache[cle]){ peindreDecouv(decCache[cle], "filtre"); return; }
   box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
   try{
-    const d = await chargerFiltre(decOnglet, decFiltre);
+    const d = await chargerFiltre(decOnglet, decFiltre, { genre: decGenre });
+    d.seed = 0;   // pour "Pour toi" au prochain refresh
     decCache[cle] = d;
-    if(page==="decouv" && !decQ && (decOnglet+":"+decFiltre)===cle) peindreDecouv(d, "filtre");
+    if(page==="decouv" && !decQ && (decOnglet+":"+decFiltre+":"+(decGenre||"tout"))===cle) peindreDecouv(d, "filtre");
   }catch(e){
     box.innerHTML = `<p class="err" style="padding:10px 0">${esc(e.message)}</p>
       <button class="btn ghost" style="width:100%;margin-top:8px" data-decretry="1">Réessayer</button>`;
@@ -794,7 +909,8 @@ function peindreDecouv(d, mode){
         <div class="pq">${dedans?"déjà dans ta liste":pq}</div>
       </div>
     </div>`;
-  }).join("")}</div>`;
+  }).join("")}</div>
+  ${mode==="filtre" && decFiltre!=="pourtoi" && !d.finAtteinte ? `<button class="btn ghost" id="decplus" style="width:100%;margin-top:16px">Voir plus</button>` : ""}`;
 }
 
 /* ---- page Historique ---- */
@@ -891,6 +1007,12 @@ function vueReglages(){
     </div>
     <div id="cleEtat" style="font-size:13px;margin-top:10px;color:var(--brume)">${aCle()?"Clé enregistrée.":"Aucune clé — mode saisie manuelle."}</div>
     <p style="font-size:12.5px;color:var(--brume);margin-top:12px">Clé gratuite sur themoviedb.org → Paramètres → API.</p>
+  </div>
+
+  <div class="card" style="padding:17px;margin-bottom:14px">
+    <h3 style="font-size:17px;margin-bottom:5px">Compléter depuis TVmaze</h3>
+    <p style="font-size:13.5px;color:var(--brume);margin-bottom:12px">TVmaze a souvent des titres d'épisodes, des durées et des dates plus complets que TMDB. Rien ne remplace ce qui existe déjà, on ne fait que combler les trous.</p>
+    <button class="btn ghost" style="width:100%" id="rafraichirTv">Compléter les infos manquantes</button>
   </div>
 
   <div class="card" style="padding:17px;margin-bottom:14px">
@@ -1006,7 +1128,9 @@ function ajouter(){
               const id = Number(b.dataset.add);
               if(type==="series"){
                 if(D.series.some(s=>s.tmdbId===id)) throw new Error("Cette série est déjà dans ta liste.");
-                D.series.push(await importerSerie(id));
+                const s = await importerSerie(id);
+                D.series.push(s);
+                enrichirTVmaze(s).then(n => n>0 && rendre());
               }else{
                 if(D.films.some(f=>f.tmdbId===id)) throw new Error("Ce film est déjà dans ta liste.");
                 D.films.push(await importerFilm(id));
@@ -1095,9 +1219,61 @@ document.addEventListener("click", e=>{
     histSaisonOuv.has(k) ? histSaisonOuv.delete(k) : histSaisonOuv.add(k);
     rendre(); return;
   }
-  if((b=c("[data-dec]"))){ decOnglet=b.dataset.dec; decQ=""; clearTimeout(decTimer); rendre(); return; }
+  if((b=c("[data-dec]"))){ decOnglet=b.dataset.dec; decQ=""; decGenre=null; clearTimeout(decTimer); rendre(); return; }
   if((b=c("[data-decf]"))){ decFiltre=b.dataset.decf; rendre(); return; }
-  if(c("[data-decretry]")){ delete decCache[decOnglet+":"+decFiltre]; chargerDecouv(); return; }
+  if(c("[data-decretry]")){ delete decCache[decOnglet+":"+decFiltre+":"+(decGenre||"tout")]; chargerDecouv(); return; }
+  if(c("#decraf")){
+    // Rafraîchir : incrémente seed pour "Pour toi" (nouvelle fenêtre de sources),
+    // relance une page aléatoire pour les autres.
+    const cle = decOnglet+":"+decFiltre+":"+(decGenre||"tout");
+    const seed = decCache[cle]?.seed ?? 0;
+    delete decCache[cle];
+    const box = $("#decRes"); if(box) box.innerHTML = '<div style="padding:40px;text-align:center"><span class="spin"></span></div>';
+    (async()=>{
+      try{
+        const d = await chargerFiltre(decOnglet, decFiltre, { genre: decGenre, aleatoire: true, seed: seed+1 });
+        d.seed = seed + 1;
+        decCache[cle] = d;
+        peindreDecouv(d, "filtre");
+      }catch(e){ if(box) box.innerHTML = `<p class="err">${esc(e.message)}</p>`; }
+    })();
+    return;
+  }
+  if(c("#decgenre")){
+    if(decGenre){ decGenre = null; rendre(); }   // tap sur "Sci-Fi ×" → retire directement
+    else choisirGenre();                          // tap sur "Tous les genres ▾" → ouvre le sélecteur
+    return;
+  }
+  if((b=c("[data-choixgenre]"))){
+    const v = b.dataset.choixgenre;
+    decGenre = v ? Number(v) : null;
+    fermer(); rendre();
+    return;
+  }
+  if((b=c("#decplus"))){
+    const cle = decOnglet+":"+decFiltre+":"+(decGenre||"tout");
+    const cache = decCache[cle];
+    if(!cache?.pages?.length) return;
+    b.disabled = true;
+    b.textContent = "Chargement…";
+    (async()=>{
+      try{
+        const suivante = Math.max(...cache.pages) + 1;
+        const nouveau = await chargerFiltre(decOnglet, decFiltre, { genre: decGenre, pageDebut: suivante });
+        // Dédoublonner : TMDB peut renvoyer un même titre sur deux pages
+        const deja = new Set(cache.items.map(x => x.tmdbId));
+        for(const x of nouveau.items) if(!deja.has(x.tmdbId)) cache.items.push(x);
+        cache.pages.push(...nouveau.pages);
+        cache.finAtteinte = nouveau.items.length < 8;
+        peindreDecouv(cache, "filtre");
+      }catch(e){
+        b.disabled = false;
+        b.textContent = "Voir plus";
+        toast(e.message);
+      }
+    })();
+    return;
+  }
   if((b=c("[data-decadd]"))){
     const [type, idStr] = b.dataset.decadd.split(":"); const id = Number(idStr);
     if(dansMaListe(id,type)) return;
@@ -1109,8 +1285,11 @@ document.addEventListener("click", e=>{
     b.disabled = true;
     (async()=>{
       try{
-        if(type==="series") D.series.push(await importerSerie(id));
-        else D.films.push(await importerFilm(id));
+        if(type==="series"){
+          const s = await importerSerie(id);
+          D.series.push(s);
+          enrichirTVmaze(s).then(n => n>0 && rendre());
+        } else D.films.push(await importerFilm(id));
         sauver();
         invaliderSuggestions();
         if(tuile){
@@ -1205,6 +1384,27 @@ document.addEventListener("click", e=>{
         }catch(e){ alert(e.message); } };
       r.readAsText(f); };
     i.click(); return;
+  }
+  if(c("#rafraichirTv")){
+    const btn = $("#rafraichirTv");
+    const aFaire = D.series.filter(s => !s.tvmazeEnrichi && s.tmdbId);
+    if(!aFaire.length){ toast("Toutes les séries sont déjà à jour"); return; }
+    btn.disabled = true;
+    let combles = 0;
+    (async()=>{
+      for(let i=0; i<aFaire.length; i++){
+        btn.textContent = `Complétion… ${i+1}/${aFaire.length}`;
+        const n = await enrichirTVmaze(aFaire[i]);
+        combles += n;
+        // Rate limit TVmaze : 20 req/10s. Deux appels par série = 4 req/s max, on marge.
+        await new Promise(r => setTimeout(r, 200));
+      }
+      btn.disabled = false;
+      btn.textContent = "Compléter les infos manquantes";
+      rendre();
+      toast(combles > 0 ? combles+" infos ajoutées" : "Rien à compléter");
+    })();
+    return;
   }
   if(c("#reinitMasques")){
     D.masques = { series: [], films: [] };
