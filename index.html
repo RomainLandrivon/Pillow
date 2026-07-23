@@ -171,7 +171,7 @@ nav button.on{color:var(--beurre)}
 
 /* ============ état ============ */
 const CLE = "suivi:v1";
-let D = { series: [], films: [], tmdb: "", masques: { series: [], films: [] } };
+let D = { series: [], films: [], tmdb: "", masques: { series: [], films: [] }, ecarteAsie: true };
 let page = "series";
 let histOnglet = "series";
 let histSerieOuv = new Set();   // séries dépliées dans l'historique
@@ -196,6 +196,9 @@ function charger(){
   D.masques = D.masques || {};
   D.masques.series = D.masques.series || [];
   D.masques.films  = D.masques.films  || [];
+  // rétrocompatibilité : par défaut on écarte, mais si l'utilisateur a explicitement
+  // désactivé, on respecte son choix (undefined → true, false → false)
+  if(D.ecarteAsie === undefined) D.ecarteAsie = true;
 }
 function sauver(){
   try{ localStorage.setItem(CLE, JSON.stringify(D)); }
@@ -385,8 +388,13 @@ async function enrichirTVmaze(serie){
 const dansMaListe = (id,type) => type==="series" ? D.series.some(s=>s.tmdbId===id) : D.films.some(f=>f.tmdbId===id);
 // écarté à l'affichage et au chargement : ce que l'utilisatrice a masqué avec le "−"
 const estMasque = (id,type) => D.masques[type].includes(id);
-// écarté = déjà suivi OU masqué : les deux se comportent pareil pour les grilles
-const ecarte = (id,type) => dansMaListe(id,type) || estMasque(id,type);
+// Langues d'Extrême-Orient, d'Asie du Sud-Est, et bollywood.
+const LANGS_ASIE = new Set(["ja","ko","zh","cn","th","vi","id","tl","ms","hi"]);
+const estAsiatique = t => t.langue && LANGS_ASIE.has(t.langue);
+const langueEcartee = t => D.ecarteAsie && estAsiatique(t);
+// écarté = déjà suivi OU masqué OU langue écartée. Un seul point d'entrée
+// pour tous les filtres côté chargement.
+const ecarte = (t,type) => dansMaListe(t.tmdbId,type) || estMasque(t.tmdbId,type) || langueEcartee(t);
 const versTuile = (r,type) => ({
   tmdbId:r.id, type,
   titre:r.name||r.title,
@@ -395,6 +403,7 @@ const versTuile = (r,type) => ({
   note:r.vote_average||0,
   votes:r.vote_count||0,
   genres:r.genre_ids||[],
+  langue:r.original_language||"",
 });
 
 async function chercherTuiles(q){
@@ -409,8 +418,8 @@ async function chercherTuiles(q){
                     : d==="Production"? "Production"
                     : d || "";
   return {
-    series:(s.results||[]).map(r=>versTuile(r,"series")).filter(x=>x.titre),
-    films: (f.results||[]).map(r=>versTuile(r,"films")).filter(x=>x.titre),
+    series:(s.results||[]).map(r=>versTuile(r,"series")).filter(x=>x.titre && !langueEcartee(x)),
+    films: (f.results||[]).map(r=>versTuile(r,"films")).filter(x=>x.titre && !langueEcartee(x)),
     // On garde les personnes populaires qui ont au moins une œuvre connue.
     // Sans "known_for", TMDB retourne parfois des homonymes vides — inutiles ici.
     personnes: (p.results||[])
@@ -475,7 +484,7 @@ async function chargerFiltre(onglet, filtre, options={}){
     pages.push(p);
     for(const r of (d.results||[])){
       const t = versTuile(r, onglet);
-      if(ecarte(t.tmdbId, onglet)) continue;
+      if(ecarte(t, onglet)) continue;
       items.push(t);
     }
     if(items.length >= 24) break;
@@ -505,7 +514,7 @@ async function pourToiFiltre(onglet, options={}){
   }));
   const tally = new Map();
   for(const lot of lots) for(const {t,pq,poids} of lot){
-    if(ecarte(t.tmdbId, onglet)) continue;
+    if(ecarte(t, onglet)) continue;
     if(t.votes < 40) continue;
     // Un genre actif filtre côté client (les /recommendations ne prennent pas with_genres)
     if(genre && !t.genres.includes(genre)) continue;
@@ -950,7 +959,7 @@ function peindreDecouv(d, mode){
 
   const items = (mode==="recherche"
     ? (decOnglet==="series" ? d.series : d.films).slice(0,24)
-    : d.items).filter(x => !estMasque(x.tmdbId, x.type));
+    : d.items).filter(x => !estMasque(x.tmdbId, x.type) && !langueEcartee(x));
 
   if(!items.length){
     const quoi = decOnglet==="series" ? "série" : "film";
@@ -1103,6 +1112,12 @@ function vueReglages(){
     <h3 style="font-size:17px;margin-bottom:5px">Compléter depuis TVmaze</h3>
     <p style="font-size:13.5px;color:var(--brume);margin-bottom:12px">TVmaze a souvent des titres d'épisodes, des durées et des dates plus complets que TMDB. Rien ne remplace ce qui existe déjà, on ne fait que combler les trous.</p>
     <button class="btn ghost" style="width:100%" id="rafraichirTv">Compléter les infos manquantes</button>
+  </div>
+
+  <div class="card" style="padding:17px;margin-bottom:14px">
+    <h3 style="font-size:17px;margin-bottom:5px">Contenu asiatique</h3>
+    <p style="font-size:13.5px;color:var(--brume);margin-bottom:12px">Écarte de Découverte les titres dont la langue originale est japonaise, coréenne, chinoise, thaïe, vietnamienne, indonésienne, tagalog, malaise ou hindi (bollywood).</p>
+    <button class="btn ${D.ecarteAsie?'':'ghost'}" id="toggleAsie" style="width:100%">${D.ecarteAsie?"Actif — tape pour désactiver":"Inactif — tape pour activer"}</button>
   </div>
 
   <div class="card" style="padding:17px;margin-bottom:14px">
@@ -1498,6 +1513,12 @@ document.addEventListener("click", e=>{
       rendre();
       toast(combles > 0 ? combles+" infos ajoutées" : "Rien à compléter");
     })();
+    return;
+  }
+  if(c("#toggleAsie")){
+    D.ecarteAsie = !D.ecarteAsie;
+    sauver(); invaliderSuggestions(); rendre();
+    toast(D.ecarteAsie ? "Contenu asiatique masqué" : "Contenu asiatique visible");
     return;
   }
   if(c("#reinitMasques")){
