@@ -235,6 +235,13 @@ function derniereActivite(s){
   for(const d of Object.values(s.vus||{})) if(d > max) max = d;
   return max;
 }
+// date du dernier épisode marqué vu, ou null si la série n'a jamais été commencée.
+// Distincte de derniereActivite : ne fallback pas sur la date d'ajout.
+function dernierVisionnage(s){
+  let max = "";
+  for(const d of Object.values(s.vus||{})) if(d > max) max = d;
+  return max || null;
+}
 // un épisode dont la date de diffusion est dans le futur. On tolère un jour de battement
 // pour couvrir les décalages horaires France/US.
 function epFutur(ep){
@@ -581,29 +588,17 @@ function vueSeries(){
   const actives = D.series.filter(s=>!fini(s));
   if(!actives.length) return vide("Aucune série en cours","Ajoute une série avec le bouton +. L'épisode suivant s'affichera ici, prêt à cocher.");
   // Une série est "en attente" si son prochain épisode n'est pas encore diffusé.
-  // Sans épisode suivant (théoriquement impossible ici puisqu'elle n'est pas finie), on la place en "sorti".
   const sortis  = actives.filter(s => { const ep = suivant(s); return !ep || !epFutur(ep); });
   const attente = actives.filter(s => { const ep = suivant(s); return ep && epFutur(ep); });
-  const liste = serieOnglet === "sorti" ? sortis : attente;
-  if(serieOnglet === "sorti"){
-    liste.sort((a,b)=> derniereActivite(b).localeCompare(derniereActivite(a)));
-  } else {
-    // Croissant : la plus proche sortie en premier
-    liste.sort((a,b)=> (suivant(a)?.date||"9999").localeCompare(suivant(b)?.date||"9999"));
-  }
 
   const chips = `<div style="display:flex;gap:7px;margin-bottom:14px">
     <button class="chip ${serieOnglet==='sorti'?'on':''}" data-so="sorti">Déjà sorti · ${sortis.length}</button>
     <button class="chip ${serieOnglet==='attente'?'on':''}" data-so="attente">Pas encore sorti · ${attente.length}</button>
   </div>`;
 
-  if(!liste.length){
-    return chips + `<div class="vide" style="padding:32px 22px"><p style="font-size:14px">${serieOnglet==='sorti'
-      ? "Tout ce que tu suis est encore à venir. Bascule sur l'autre onglet."
-      : "Rien à venir — tout ce que tu suis est disponible."}</p></div>`;
-  }
-
-  return chips + liste.map(s=>{
+  // Rendu commun d'une carte de série. Factorisation pour éviter la duplication
+  // entre l'onglet "attente" (liste plate) et l'onglet "sorti" (trois blocs).
+  const carte = s => {
     const ep = suivant(s), t = totalEp(s), v = nbVus(s);
     const p = t ? Math.round(v/t*100) : 0;
     const code = "S"+String(ep.saison).padStart(2,"0")+"E"+String(ep.n).padStart(2,"0");
@@ -627,7 +622,42 @@ function vueSeries(){
         </div>
       </div>
     </div>`;
-  }).join("");
+  };
+
+  // Onglet Pas encore sorti : liste plate triée par date de sortie croissante
+  if(serieOnglet === "attente"){
+    if(!attente.length)
+      return chips + `<div class="vide" style="padding:32px 22px"><p style="font-size:14px">Rien à venir — tout ce que tu suis est disponible.</p></div>`;
+    attente.sort((a,b)=> (suivant(a)?.date||"9999").localeCompare(suivant(b)?.date||"9999"));
+    return chips + attente.map(carte).join("");
+  }
+
+  // Onglet Déjà sorti : trois blocs.
+  if(!sortis.length)
+    return chips + `<div class="vide" style="padding:32px 22px"><p style="font-size:14px">Tout ce que tu suis est encore à venir. Bascule sur l'autre onglet.</p></div>`;
+
+  // Seuil "en pause" : plus d'un mois sans épisode coché
+  const seuilPause = new Date(Date.now() - 30*86400000).toISOString();
+
+  const nonCommencees = sortis.filter(s => dernierVisionnage(s) === null)
+    .sort((a,b) => (b.ajoute||"").localeCompare(a.ajoute||""));
+  const commencees = sortis.filter(s => dernierVisionnage(s) !== null);
+  const enCours = commencees.filter(s => dernierVisionnage(s) >= seuilPause)
+    .sort((a,b) => dernierVisionnage(b).localeCompare(dernierVisionnage(a)));
+  const enPause = commencees.filter(s => dernierVisionnage(s) < seuilPause)
+    .sort((a,b) => dernierVisionnage(b).localeCompare(dernierVisionnage(a)));
+
+  const bloc = (titre, items) => items.length
+    ? `<div style="margin-bottom:22px">
+        <div class="eyebrow" style="margin-bottom:10px">${titre} · ${items.length}</div>
+        ${items.map(carte).join("")}
+      </div>`
+    : "";
+
+  return chips
+    + bloc("EN COURS", enCours)
+    + bloc("EN PAUSE", enPause)
+    + bloc("À COMMENCER", nonCommencees);
 }
 
 /* ---- page Films ---- */
