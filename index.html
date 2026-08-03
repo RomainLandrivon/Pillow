@@ -6,8 +6,8 @@
 <meta name="theme-color" content="#191221">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Suivi">
-<title>Suivi</title>
+<meta name="apple-mobile-web-app-title" content="Pillow">
+<title>Pillow</title>
 <link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -141,10 +141,10 @@ nav button.on{color:var(--beurre)}
 .btn.danger{background:transparent;border:1px solid var(--rose);color:var(--rose)}
 
 .sheet{position:fixed;inset:0;z-index:50;background:rgba(12,8,17,.78);backdrop-filter:blur(4px);display:flex;align-items:flex-end;justify-content:center}
-.sheet > div{position:relative;background:var(--nuit-2);border:1px solid var(--bord);border-bottom:none;border-radius:20px 20px 0 0;width:100%;max-width:720px;max-height:88vh;overflow-y:auto;padding:20px 20px calc(28px + var(--safe-b))}
+.sheet > div{position:relative;background:var(--nuit-2);border:1px solid var(--bord);border-bottom:none;border-radius:20px 20px 0 0;width:100%;max-width:720px;max-height:88vh;overflow-y:auto;padding:44px 20px calc(28px + var(--safe-b))}
 .fermer-x{position:absolute;top:12px;right:12px;width:34px;height:34px;border-radius:50%;background:var(--nuit-3);border:1px solid var(--bord);color:var(--ivoire);font-size:19px;line-height:1;display:grid;place-items:center;z-index:5}
 .attente{opacity:.58}
-.poignee{width:38px;height:4px;background:var(--bord);border-radius:99px;margin:0 auto 16px}
+.poignee{display:none}
 .toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(94px + var(--safe-b));z-index:60;background:var(--ivoire);color:var(--nuit);padding:10px 16px;border-radius:99px;font-size:13.5px;font-weight:600;box-shadow:0 6px 22px rgba(0,0,0,.4)}
 .spin{width:17px;height:17px;border:2px solid var(--bord);border-top-color:var(--beurre);border-radius:50%;animation:s .7s linear infinite;display:inline-block}
 @keyframes s{to{transform:rotate(360deg)}}
